@@ -2,7 +2,47 @@ import React, { useState, useEffect } from 'react';
 import { Plus, Trash2, Download, Play, Settings, Image, FileText, X, Upload, GripVertical, Copy, RefreshCw, Save, FolderOpen, Music, Volume2, Check } from 'lucide-react';
 
 export default function VideoCreator() {
-  const API = import.meta.env.VITE_API_URL || 'http://localhost:5001';
+  // ========== FIXED API URL DETECTION ==========
+  const getApiUrl = () => {
+    // Check if we're in production (Vercel)
+    if (typeof window !== 'undefined') {
+      const hostname = window.location.hostname;
+      
+      // If running on localhost, use env variable or default
+      if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return import.meta.env.VITE_API_URL || 'http://localhost:5001';
+      }
+      
+      // In production, use the env variable (your ngrok URL)
+      return import.meta.env.VITE_API_URL || 'http://localhost:5001';
+    }
+    
+    return 'http://localhost:5001';
+  };
+  
+  const API = getApiUrl();
+  
+  // ========== NGROK FIX: Helper function to add ngrok header to all requests ==========
+  const fetchAPI = (url, options = {}) => {
+    return fetch(url, {
+      ...options,
+      headers: {
+        'ngrok-skip-browser-warning': 'true',
+        ...options.headers,
+      },
+    });
+  };
+  
+  // Log API URL for debugging
+  useEffect(() => {
+    console.log('🔗 API URL:', API);
+    
+    // Test API connection
+    fetchAPI(`${API}/api/health`)
+      .then(res => res.json())
+      .then(data => console.log('✅ API Health Check:', data))
+      .catch(err => console.error('❌ API Connection Failed:', err));
+  }, [API]);
   
   const [project, setProject] = useState('my_video');
   const [text, setText] = useState('');
@@ -53,23 +93,57 @@ export default function VideoCreator() {
     setEstimatedTime(est);
   }, [scenes.length]);
 
+  // ========== FIXED: Enhanced loadVoices with better error handling ==========
   const loadVoices = async () => {
-    if (voicesLoading || voicesLoaded) return;
+    if (voicesLoading || voicesLoaded) {
+      console.log('⏭️ Skipping voice load (already loading or loaded)');
+      return;
+    }
     
     setVoicesLoading(true);
+    setStatus('🎙️ Loading ElevenLabs voices...');
+    
     try {
-      const res = await fetch(`${API}/api/voices`);
+      const url = `${API}/api/voices`;
+      console.log('🔄 Fetching voices from:', url);
+      
+      const res = await fetchAPI(url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+      });
+      
+      console.log('📡 Response status:', res.status);
+      
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      
       const data = await res.json();
-      setVoices(data.voices || []);
-      setVoicesLoaded(true);
+      console.log('📦 Voices response:', data);
+      
+      if (data.success && Array.isArray(data.voices)) {
+        setVoices(data.voices);
+        setVoicesLoaded(true);
+        setStatus(`✅ Loaded ${data.voices.length} voices`);
+        console.log(`✅ Successfully loaded ${data.voices.length} voices`);
+      } else {
+        throw new Error(data.error || 'Invalid response format');
+      }
     } catch (err) {
-      console.error('Voice load failed:', err);
+      console.error('❌ Voice load failed:', err);
+      setStatus(`❌ Voice loading failed: ${err.message}`);
+      setVoices([]);
+      setVoicesLoaded(false);
     } finally {
       setVoicesLoading(false);
     }
   };
 
   const toggleElevenLabs = (enabled) => {
+    console.log('🎙️ ElevenLabs toggled:', enabled);
     setUseElevenLabs(enabled);
     if (enabled && !voicesLoaded && !voicesLoading) {
       loadVoices();
@@ -84,7 +158,7 @@ export default function VideoCreator() {
     setGenScript(true);
     setStatus('🤖 Generating script...');
     try {
-      const res = await fetch(`${API}/api/generate_script`, {
+      const res = await fetchAPI(`${API}/api/generate_script`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic: scriptTopic, style: scriptStyle, duration: scriptDuration })
@@ -112,7 +186,7 @@ export default function VideoCreator() {
     setLoading(true);
     setStatus('✂️ Splitting by sentences...');
     try {
-      const res = await fetch(`${API}/api/split`, {
+      const res = await fetchAPI(`${API}/api/split`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text })
@@ -189,27 +263,47 @@ export default function VideoCreator() {
     fd.append('scene_id', scenes[idx].id);
     try {
       setStatus('📤 Uploading...');
-      const res = await fetch(`${API}/api/upload_background`, { method: 'POST', body: fd });
+      const res = await fetchAPI(`${API}/api/upload_background`, { method: 'POST', body: fd });
       const data = await res.json();
+      
+      console.log('📤 Upload response:', data);
+      
       if (data.background_path) {
-        update(idx, 'background_path', data.background_path);
+        // Use the URL instead of path for remote backend
+        const displayPath = data.url || data.background_path;
+        update(idx, 'background_path', displayPath);
         setStatus('✅ Uploaded!');
       }
     } catch (err) {
+      console.error('Upload error:', err);
       setStatus(`❌ Failed: ${err.message}`);
     }
   };
 
+  // ========== FIXED: Stock search with better error handling ==========
   const searchStock = async (q) => {
     if (!q.trim()) return;
     setLoadingStock(true);
     setStatus('🔍 Searching stock...');
+    
     try {
-      const res = await fetch(`${API}/api/stock_search?query=${encodeURIComponent(q)}`);
+      const url = `${API}/api/stock_search?query=${encodeURIComponent(q)}`;
+      console.log('🔍 Searching:', url);
+      
+      const res = await fetchAPI(url);
       const data = await res.json();
-      setStockResults(data.results || []);
-      setStatus(data.results?.length > 0 ? `✅ Found ${data.results.length} results` : '❌ No results');
+      
+      console.log('📦 Stock results:', data);
+      
+      if (data.success && data.results) {
+        setStockResults(data.results);
+        setStatus(data.results.length > 0 ? `✅ Found ${data.results.length} results` : '❌ No results');
+      } else {
+        setStockResults([]);
+        setStatus('❌ No results');
+      }
     } catch (err) {
+      console.error('Stock search error:', err);
       setStatus(`❌ Search failed: ${err.message}`);
       setStockResults([]);
     } finally {
@@ -217,44 +311,67 @@ export default function VideoCreator() {
     }
   };
 
+  // ========== FIXED: Stock apply with proper path handling ==========
   const applyStock = async (media) => {
     if (selectedForStock === null) return;
+    
     try {
       setStatus('📥 Downloading...');
-      const res = await fetch(`${API}/api/download_stock`, {
+      console.log('📥 Downloading stock media:', media);
+      
+      const res = await fetchAPI(`${API}/api/download_stock`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: media.url, scene_id: scenes[selectedForStock].id, type: media.type })
+        body: JSON.stringify({ 
+          url: media.url, 
+          scene_id: scenes[selectedForStock].id, 
+          type: media.type 
+        })
       });
+      
       const data = await res.json();
-      if (data.path) {
-        update(selectedForStock, 'background_path', data.path);
+      console.log('📦 Stock download response:', data);
+      
+      if (data.success && data.url) {
+        // Use the URL provided by backend
+        update(selectedForStock, 'background_path', data.url);
         setStatus('✅ Applied!');
         setShowStock(false);
+      } else {
+        setStatus(`❌ Failed: ${data.error || 'Unknown error'}`);
       }
     } catch (err) {
+      console.error('Stock apply error:', err);
       setStatus(`❌ Failed: ${err.message}`);
     }
   };
 
+  // ========== FIXED: Retry with proper URL handling ==========
   const retry = async (idx) => {
     const s = scenes[idx];
     setRetrying(prev => new Set(prev).add(idx));
     setStatus(`🔄 Retrying scene ${idx + 1}...`);
+    
     try {
-      const res = await fetch(`${API}/api/generate_images`, {
+      const res = await fetchAPI(`${API}/api/generate_images`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scenes: [s] })
       });
+      
       const data = await res.json();
+      console.log('🎨 Retry response:', data);
+      
       if (data.images && data.images[0].success) {
-        update(idx, 'background_path', data.images[0].background_path);
+        // Use URL if available, fallback to path
+        const imagePath = data.images[0].url || data.images[0].background_path;
+        update(idx, 'background_path', imagePath);
         setStatus('✅ Generated!');
       } else {
         setStatus(`❌ Failed: ${data.images[0].error || 'Unknown'}`);
       }
     } catch (err) {
+      console.error('Retry error:', err);
       setStatus(`❌ Error: ${err.message}`);
     } finally {
       setRetrying(prev => {
@@ -265,31 +382,40 @@ export default function VideoCreator() {
     }
   };
 
+  // ========== FIXED: Generate images with URL handling ==========
   const genImages = async () => {
     if (scenes.length === 0) return;
     setLoading(true);
     setStatus('🎨 Generating images...');
+    
     try {
-      const res = await fetch(`${API}/api/generate_images`, {
+      const res = await fetchAPI(`${API}/api/generate_images`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scenes })
       });
+      
       const data = await res.json();
+      console.log('🎨 Generate images response:', data);
+      
       if (data.images) {
         const upd = [...scenes];
         let cnt = 0;
+        
         data.images.forEach(img => {
           const i = upd.findIndex(s => s.id === img.id);
           if (i >= 0 && img.success) {
-            upd[i].background_path = img.background_path;
+            // Use URL if available, fallback to path
+            upd[i].background_path = img.url || img.background_path;
             cnt++;
           }
         });
+        
         setScenes(upd);
         setStatus(`✅ Generated ${cnt}/${data.images.length}`);
       }
     } catch (err) {
+      console.error('Generate images error:', err);
       setStatus(`❌ Error: ${err.message}`);
     } finally {
       setLoading(false);
@@ -302,7 +428,7 @@ export default function VideoCreator() {
     fd.append('file', file);
     try {
       setStatus('📤 Uploading music...');
-      const res = await fetch(`${API}/api/music/upload`, { method: 'POST', body: fd });
+      const res = await fetchAPI(`${API}/api/music/upload`, { method: 'POST', body: fd });
       const data = await res.json();
       if (data.success) {
         setSelectedMusic({ 
@@ -349,7 +475,7 @@ export default function VideoCreator() {
     }, 3000);
     
     try {
-      const res = await fetch(`${API}/api/render`, {
+      const res = await fetchAPI(`${API}/api/render`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -370,12 +496,11 @@ export default function VideoCreator() {
       setProgress(100);
       setStage('Complete!');
       
-      if (data.video_path) {
-        const fn = data.video_path.split('\\').pop().split('/').pop();
+      if (data.filename) {
         setVideoUrl({
           download: data.download_url,
-          preview: `${API}/api/video/${fn}`,
-          filename: fn
+          preview: `${API}/api/video/${data.filename}`,
+          filename: data.filename
         });
         setStatus('✅ Video ready!');
         setRendering(false);
@@ -478,6 +603,7 @@ export default function VideoCreator() {
               <h1 className="text-3xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
                 AI Text-to-Video Studio
               </h1>
+              <p className="text-xs text-slate-400 mt-1">API: {API}</p>
             </div>
             <div className="flex items-center space-x-4">
               <input
