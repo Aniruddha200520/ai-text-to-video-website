@@ -21,11 +21,13 @@ from io import BytesIO
 
 app = Flask(__name__)
 # Allow both local development and Vercel deployment
-CORS(app, origins=[
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "https://*.vercel.app"
-])
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 
 for p in (UPLOADS, OUTPUTS, MUSIC_CACHE):
     os.makedirs(p, exist_ok=True)
