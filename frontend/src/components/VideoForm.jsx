@@ -269,9 +269,12 @@ export default function VideoCreator() {
       console.log('📤 Upload response:', data);
       
       if (data.background_path) {
-        // Use the URL instead of path for remote backend
-        const displayPath = data.url || data.background_path;
-        update(idx, 'background_path', displayPath);
+        // Store local path for rendering
+        update(idx, 'background_path', data.background_path);
+        // Store URL for preview
+        if (data.url) {
+          update(idx, 'preview_url', `${API}${data.url}`);
+        }
         setStatus('✅ Uploaded!');
       }
     } catch (err) {
@@ -332,9 +335,13 @@ export default function VideoCreator() {
       const data = await res.json();
       console.log('📦 Stock download response:', data);
       
-      if (data.success && data.url) {
-        // Use the URL provided by backend
-        update(selectedForStock, 'background_path', data.url);
+      if (data.success && data.path) {
+        // Store local path for rendering
+        update(selectedForStock, 'background_path', data.path);
+        // Store URL for preview
+        if (data.url) {
+          update(selectedForStock, 'preview_url', `${API}${data.url}`);
+        }
         setStatus('✅ Applied!');
         setShowStock(false);
       } else {
@@ -363,9 +370,12 @@ export default function VideoCreator() {
       console.log('🎨 Retry response:', data);
       
       if (data.images && data.images[0].success) {
-        // Use URL if available, fallback to path
-        const imagePath = data.images[0].url || data.images[0].background_path;
-        update(idx, 'background_path', imagePath);
+        // Store local path for rendering
+        update(idx, 'background_path', data.images[0].background_path);
+        // Store URL for preview
+        if (data.images[0].url) {
+          update(idx, 'preview_url', `${API}${data.images[0].url}`);
+        }
         setStatus('✅ Generated!');
       } else {
         setStatus(`❌ Failed: ${data.images[0].error || 'Unknown'}`);
@@ -405,8 +415,10 @@ export default function VideoCreator() {
         data.images.forEach(img => {
           const i = upd.findIndex(s => s.id === img.id);
           if (i >= 0 && img.success) {
-            // Use URL if available, fallback to path
-            upd[i].background_path = img.url || img.background_path;
+            // Store local path for backend rendering
+            upd[i].background_path = img.background_path;
+            // Store URL for frontend preview
+            upd[i].preview_url = img.url ? `${API}${img.url}` : null;
             cnt++;
           }
         });
@@ -840,9 +852,25 @@ export default function VideoCreator() {
                             </button>
                           </div>
                           {s.background_path && (
-                            <div className="text-xs text-green-400 bg-green-500/10 px-2 py-2 rounded flex items-center space-x-2">
-                              <Check size={12} />
-                              <span>Background ready</span>
+                            <div className="space-y-2">
+                              <div className="relative w-full h-32 bg-slate-800 rounded overflow-hidden">
+                                <img 
+                                  src={s.preview_url || s.background_path}
+                                  alt={`Scene ${i + 1} background`}
+                                  className="w-full h-full object-cover"
+                                  onError={(e) => {
+                                    e.target.style.display = 'none';
+                                    e.target.nextElementSibling.style.display = 'flex';
+                                  }}
+                                />
+                                <div className="hidden absolute inset-0 items-center justify-center bg-slate-700 text-slate-400 text-xs">
+                                  Preview unavailable
+                                </div>
+                              </div>
+                              <div className="text-xs text-green-400 bg-green-500/10 px-2 py-1 rounded flex items-center space-x-2">
+                                <Check size={12} />
+                                <span>Background ready</span>
+                              </div>
                             </div>
                           )}
                         </div>
