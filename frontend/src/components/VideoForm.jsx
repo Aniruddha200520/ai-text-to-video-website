@@ -57,7 +57,7 @@ export default function VideoCreator() {
   const [voices, setVoices] = useState([]);
   const [voicesLoading, setVoicesLoading] = useState(false);
   const [voicesLoaded, setVoicesLoaded] = useState(false);
-  const [autoAI, setAutoAI] = useState(true);
+  const [autoAI, setAutoAI] = useState(false);
   const [showScript, setShowScript] = useState(false);
   const [scriptTopic, setScriptTopic] = useState('');
   const [scriptStyle, setScriptStyle] = useState('educational');
@@ -852,25 +852,9 @@ export default function VideoCreator() {
                             </button>
                           </div>
                           {s.background_path && (
-                            <div className="space-y-2">
-                              <div className="relative w-full h-32 bg-slate-800 rounded overflow-hidden">
-                                <img 
-                                  src={s.preview_url || s.background_path}
-                                  alt={`Scene ${i + 1} background`}
-                                  className="w-full h-full object-cover"
-                                  onError={(e) => {
-                                    e.target.style.display = 'none';
-                                    e.target.nextElementSibling.style.display = 'flex';
-                                  }}
-                                />
-                                <div className="hidden absolute inset-0 items-center justify-center bg-slate-700 text-slate-400 text-xs">
-                                  Preview unavailable
-                                </div>
-                              </div>
-                              <div className="text-xs text-green-400 bg-green-500/10 px-2 py-1 rounded flex items-center space-x-2">
-                                <Check size={12} />
-                                <span>Background ready</span>
-                              </div>
+                            <div className="text-xs text-green-400 bg-green-500/10 px-2 py-2 rounded flex items-center space-x-2">
+                              <Check size={12} />
+                              <span>Background ready</span>
                             </div>
                           )}
                         </div>
