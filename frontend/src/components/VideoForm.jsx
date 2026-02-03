@@ -852,9 +852,19 @@ export default function VideoCreator() {
                             </button>
                           </div>
                           {s.background_path && (
-                            <div className="text-xs text-green-400 bg-green-500/10 px-2 py-2 rounded flex items-center space-x-2">
-                              <Check size={12} />
-                              <span>Background ready</span>
+                            <div className="flex items-center justify-between bg-green-500/10 px-3 py-2 rounded border border-green-500/30">
+                              <div className="flex items-center space-x-2">
+                                <Check size={12} className="text-green-400" />
+                                <span className="text-xs text-green-400">Background ready</span>
+                              </div>
+                              <button
+                                onClick={() => window.open(s.preview_url || `${API}${s.background_path}`, '_blank')}
+                                className="flex items-center space-x-1 bg-green-500/20 hover:bg-green-500/30 px-2 py-1 rounded text-xs text-green-300 transition-all"
+                                title="Preview image"
+                              >
+                                <Image size={12} />
+                                <span>Preview</span>
+                              </button>
                             </div>
                           )}
                         </div>
@@ -892,16 +902,7 @@ export default function VideoCreator() {
                     </div>
                   )}
                   {videoUrl && (
-                    <div className="space-y-4 mt-4">
-                      <video 
-                        controls 
-                        controlsList="nodownload"
-                        className="w-full rounded-lg bg-black border border-purple-500/30"
-                        style={{ maxHeight: '300px' }}
-                        key={videoUrl.preview}
-                      >
-                        <source src={videoUrl.preview} type="video/mp4" />
-                      </video>
+                    <div className="mt-4">
                       <div className="flex space-x-3">
                         <button
                           onClick={download}
