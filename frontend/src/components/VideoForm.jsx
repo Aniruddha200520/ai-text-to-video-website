@@ -42,6 +42,15 @@ export default function VideoCreator() {
       .then(res => res.json())
       .then(data => console.log('✅ API Health Check:', data))
       .catch(err => console.error('❌ API Connection Failed:', err));
+    
+    // Check SVD availability
+    fetchAPI(`${API}/api/svd_status`)
+      .then(res => res.json())
+      .then(data => {
+        setSvdAvailable(data.available);
+        console.log('🎬 SVD Status:', data.available ? 'Available' : 'Not Available');
+      })
+      .catch(err => console.error('❌ SVD Check Failed:', err));
   }, [API]);
   
   const [project, setProject] = useState('my_video');
@@ -78,6 +87,9 @@ export default function VideoCreator() {
   const [loadingStock, setLoadingStock] = useState(false);
   const [selectedForStock, setSelectedForStock] = useState(null);
   const [selectedMusic, setSelectedMusic] = useState(null);
+  const [svdAvailable, setSvdAvailable] = useState(false);
+  const [animateImages, setAnimateImages] = useState(false);
+  const [sceneTypes, setSceneTypes] = useState({}); // {scene_id: 'image' | 'video'}
   const [musicVolume, setMusicVolume] = useState(10);
 
   const totalDur = scenes.reduce((sum, s) => sum + (parseFloat(s.duration) || 0), 0);
@@ -392,21 +404,24 @@ export default function VideoCreator() {
     }
   };
 
-  // ========== FIXED: Generate images with URL handling ==========
+  // ========== UPDATED: Generate images with fallback + animation support ==========
   const genImages = async () => {
     if (scenes.length === 0) return;
     setLoading(true);
-    setStatus('🎨 Generating images...');
+    setStatus(animateImages ? '🎬 Generating & animating images...' : '🎨 Generating images...');
     
     try {
-      const res = await fetchAPI(`${API}/api/generate_images`, {
+      const res = await fetchAPI(`${API}/api/generate_images_v2`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scenes })
+        body: JSON.stringify({ 
+          scenes,
+          animate: animateImages
+        })
       });
       
       const data = await res.json();
-      console.log('🎨 Generate images response:', data);
+      console.log('🎨 Generate images v2 response:', data);
       
       if (data.images) {
         const upd = [...scenes];
@@ -419,6 +434,9 @@ export default function VideoCreator() {
             upd[i].background_path = img.background_path;
             // Store URL for frontend preview
             upd[i].preview_url = img.url ? `${API}${img.url}` : null;
+            // Store source info
+            upd[i].image_source = img.source; // 'cloudflare' or 'pexels'
+            upd[i].is_animated = img.animated || false;
             cnt++;
           }
         });
@@ -722,7 +740,18 @@ export default function VideoCreator() {
                 <div className="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-purple-500/30">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-xl font-semibold">Scenes ({scenes.length})</h3>
-                    <div className="flex space-x-2">
+                    <div className="flex items-center space-x-3">
+                      {svdAvailable && (
+                        <label className="flex items-center space-x-2 bg-slate-700/50 px-3 py-2 rounded-lg text-sm cursor-pointer hover:bg-slate-700/70 transition-all">
+                          <input
+                            type="checkbox"
+                            checked={animateImages}
+                            onChange={(e) => setAnimateImages(e.target.checked)}
+                            className="w-4 h-4 text-purple-500 bg-slate-600 border-slate-500 rounded focus:ring-purple-500"
+                          />
+                          <span className="text-xs">🎬 Animate</span>
+                        </label>
+                      )}
                       <button 
                         onClick={() => setShowBulk(true)} 
                         className="bg-blue-500/20 hover:bg-blue-500/30 px-3 py-2 rounded-lg text-sm transition-all"
@@ -855,7 +884,18 @@ export default function VideoCreator() {
                             <div className="flex items-center justify-between bg-green-500/10 px-3 py-2 rounded border border-green-500/30">
                               <div className="flex items-center space-x-2">
                                 <Check size={12} className="text-green-400" />
-                                <span className="text-xs text-green-400">Background ready</span>
+                                <div className="flex flex-col">
+                                  <span className="text-xs text-green-400">
+                                    Background ready
+                                    {s.is_animated && <span className="ml-1">🎬</span>}
+                                  </span>
+                                  {s.image_source && (
+                                    <span className="text-[10px] text-green-300/70">
+                                      {s.image_source === 'cloudflare' ? '⚡ Cloudflare' : '📸 Pexels'}
+                                      {s.is_animated && ' • Animated'}
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                               <button
                                 onClick={() => window.open(s.preview_url || `${API}${s.background_path}`, '_blank')}
@@ -1013,6 +1053,17 @@ export default function VideoCreator() {
             <div className="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-purple-500/30">
               <h3 className="text-lg font-semibold mb-4">🎨 Visual Settings</h3>
               <div className="space-y-4">
+                {svdAvailable && (
+                  <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-3 mb-4">
+                    <div className="flex items-center space-x-2 text-xs text-green-400">
+                      <Check size={12} />
+                      <span className="font-semibold">GPU Animation Ready</span>
+                    </div>
+                    <p className="text-[10px] text-green-300/70 mt-1">
+                      Stable Video Diffusion available for image animation
+                    </p>
+                  </div>
+                )}
                 <div className="flex items-center justify-between">
                   <span className="text-sm">Auto AI Images</span>
                   <label className="relative inline-flex items-center cursor-pointer">

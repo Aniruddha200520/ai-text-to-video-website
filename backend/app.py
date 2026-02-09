@@ -19,6 +19,15 @@ import requests
 from PIL import Image
 from io import BytesIO
 
+# ========== NEW: SVD AND PEXELS IMPORTS ==========
+from svd_animator import animate_image, is_svd_available, ken_burns_effect
+from pexels_api import (
+    search_pexels_images, 
+    search_pexels_videos,
+    search_and_download_image,
+    search_and_download_video
+)
+
 app = Flask(__name__)
 
 # ========== FIXED CORS CONFIGURATION ==========
@@ -640,6 +649,215 @@ def root():
         "service": "ai-text-to-video-backend",
         "cloudflare": client.get("available", False),
         "cors": "enabled"
+    })
+
+# ========== NEW ENDPOINTS: SVD ANIMATION & PEXELS ==========
+
+@app.route("/api/animate_image", methods=["POST", "OPTIONS"])
+def animate_image_endpoint():
+    """Animate a static image using SVD or Ken Burns fallback"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        data = request.json
+        image_path = data.get("image_path")
+        scene_id = data.get("scene_id", "scene")
+        use_svd = data.get("use_svd", True)
+        
+        if not image_path or not os.path.exists(image_path):
+            return jsonify({"success": False, "error": "Image not found"}), 400
+        
+        output_filename = f"{scene_id}_animated.mp4"
+        output_path = os.path.join(UPLOADS, output_filename)
+        
+        if use_svd and is_svd_available():
+            print("[INFO] Using Stable Video Diffusion")
+            result = animate_image(image_path, output_path)
+        else:
+            print("[INFO] Using Ken Burns effect")
+            result = ken_burns_effect(image_path, output_path)
+        
+        if result["success"]:
+            return jsonify({
+                "success": True,
+                "path": output_path,
+                "url": f"/api/uploads/{output_filename}",
+                "filename": output_filename,
+                "duration": result.get("duration", 3),
+                "method": result.get("method", "svd")
+            })
+        else:
+            return jsonify(result), 500
+            
+    except Exception as e:
+        print(f"[ERROR] Animation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/generate_images_v2", methods=["POST", "OPTIONS"])
+def generate_images_v2():
+    """Smart image generation with Cloudflare → Pexels fallback + optional animation"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        data = request.json
+        scenes = data.get("scenes", [])
+        animate = data.get("animate", False)
+        
+        results = []
+        
+        for scene in scenes:
+            scene_id = scene["id"]
+            text = scene.get("text", "")
+            prompt = scene.get("image_prompt") or text
+            
+            print(f"[INFO] Generating image for {scene_id}: {prompt}")
+            
+            cloudflare_success = False
+            try:
+                result_path = ai_generate_image(prompt, scene_id)
+                
+                if result_path and os.path.exists(result_path):
+                    cloudflare_success = True
+                    filename = os.path.basename(result_path)
+                    source = "cloudflare"
+                    print(f"[OK] Cloudflare generated: {result_path}")
+                    
+            except Exception as e:
+                print(f"[WARN] Cloudflare failed: {e}")
+            
+            if not cloudflare_success:
+                print(f"[INFO] Falling back to Pexels for {scene_id}...")
+                pexels_result = search_and_download_image(prompt, scene_id, UPLOADS)
+                
+                if pexels_result["success"]:
+                    result_path = pexels_result["path"]
+                    filename = pexels_result["filename"]
+                    source = "pexels"
+                    print(f"[OK] Pexels downloaded: {result_path}")
+                else:
+                    results.append({
+                        "id": scene_id,
+                        "success": False,
+                        "error": "Both Cloudflare and Pexels failed"
+                    })
+                    continue
+            
+            final_path = result_path
+            final_filename = filename
+            is_animated = False
+            
+            if animate:
+                print(f"[INFO] Animating {scene_id}...")
+                anim_filename = f"{scene_id}_animated.mp4"
+                anim_path = os.path.join(UPLOADS, anim_filename)
+                
+                if is_svd_available():
+                    anim_result = animate_image(result_path, anim_path)
+                else:
+                    anim_result = ken_burns_effect(result_path, anim_path)
+                
+                if anim_result["success"]:
+                    final_path = anim_path
+                    final_filename = anim_filename
+                    is_animated = True
+                    print(f"[OK] Animated: {final_path}")
+            
+            results.append({
+                "id": scene_id,
+                "success": True,
+                "background_path": final_path,
+                "url": f"/api/uploads/{final_filename}",
+                "filename": final_filename,
+                "source": source,
+                "animated": is_animated
+            })
+        
+        return jsonify({"images": results})
+        
+    except Exception as e:
+        print(f"[ERROR] Image generation v2 failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/search_pexels_videos", methods=["GET", "OPTIONS"])
+def search_videos():
+    """Search Pexels for stock videos"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        query = request.args.get("query", "")
+        
+        if not query:
+            return jsonify({"success": False, "error": "Query required"}), 400
+        
+        print(f"[INFO] Searching Pexels videos: {query}")
+        results = search_pexels_videos(query, per_page=15)
+        
+        return jsonify({
+            "success": True,
+            "results": results,
+            "count": len(results)
+        })
+        
+    except Exception as e:
+        print(f"[ERROR] Pexels video search failed: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/download_pexels_video", methods=["POST", "OPTIONS"])
+def download_video():
+    """Download a Pexels video"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    try:
+        data = request.json
+        url = data.get("url")
+        scene_id = data.get("scene_id")
+        
+        if not url or not scene_id:
+            return jsonify({"success": False, "error": "Missing parameters"}), 400
+        
+        print(f"[INFO] Downloading Pexels video for {scene_id}")
+        
+        filename = f"{scene_id}_pexels_video.mp4"
+        save_path = os.path.join(UPLOADS, filename)
+        
+        from pexels_api import download_pexels_media
+        result = download_pexels_media(url, save_path)
+        
+        if result["success"]:
+            return jsonify({
+                "success": True,
+                "path": save_path,
+                "url": f"/api/uploads/{filename}",
+                "filename": filename
+            })
+        else:
+            return jsonify(result), 500
+            
+    except Exception as e:
+        print(f"[ERROR] Pexels video download failed: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/svd_status", methods=["GET", "OPTIONS"])
+def svd_status():
+    """Check if SVD is available"""
+    if request.method == "OPTIONS":
+        return "", 200
+    
+    return jsonify({
+        "available": is_svd_available(),
+        "fallback": "ken_burns"
     })
 
 if __name__ == "__main__":
