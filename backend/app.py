@@ -719,7 +719,13 @@ def generate_images_v2():
             
             cloudflare_success = False
             try:
-                result_path = ai_generate_image(prompt, scene_id)
+                # FIX: Create proper file path for Cloudflare
+                filename = f"{scene_id}.png"
+                result_path = os.path.join(UPLOADS, filename)
+                os.makedirs(UPLOADS, exist_ok=True)
+                
+                # Call Cloudflare with proper path
+                result_path = ai_generate_image(prompt, result_path)
                 
                 if result_path and os.path.exists(result_path):
                     cloudflare_success = True
@@ -729,6 +735,8 @@ def generate_images_v2():
                     
             except Exception as e:
                 print(f"[WARN] Cloudflare failed: {e}")
+                import traceback
+                traceback.print_exc()
             
             if not cloudflare_success:
                 print(f"[INFO] Falling back to Pexels for {scene_id}...")

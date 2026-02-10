@@ -1,17 +1,33 @@
+#!/usr/bin/env python3
 """
-Stable Video Diffusion - Image Animation Module
-Converts static images into short animated video clips
+Stable Video Diffusion Image Animator
+ULTRA-OPTIMIZED for RTX 3050 (4GB VRAM)
 """
 
-import os
 import torch
-import cv2
 import numpy as np
+import cv2
 from PIL import Image
-from pathlib import Path
+import os
 
-# Global pipeline (load once, reuse)
+# Global pipeline cache
 _svd_pipeline = None
+
+
+def is_svd_available():
+    """Check if SVD can be loaded"""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return False
+        
+        # Try to load the pipeline
+        pipe = load_svd_pipeline()
+        return pipe is not None
+    except Exception as e:
+        print(f"[SVD] Not available: {e}")
+        return False
+
 
 def load_svd_pipeline():
     """Load SVD pipeline once and cache it"""
@@ -22,144 +38,244 @@ def load_svd_pipeline():
     
     try:
         from diffusers import StableVideoDiffusionPipeline
+        import torch
         
         print("[SVD] Loading Stable Video Diffusion pipeline...")
+        
+        # Load with optimizations for 4GB VRAM
         _svd_pipeline = StableVideoDiffusionPipeline.from_pretrained(
             "stabilityai/stable-video-diffusion-img2vid-xt",
             torch_dtype=torch.float16,
-            variant="fp16"
+            variant="fp16",
+            low_cpu_mem_usage=True
         )
+        
+        # Move to GPU
         _svd_pipeline.to("cuda")
-        _svd_pipeline.enable_model_cpu_offload()  # Optimize memory
+        
+        # CRITICAL: Enable CPU offloading to save VRAM
+        _svd_pipeline.enable_model_cpu_offload()
+        
         print("[SVD] Pipeline loaded successfully!")
         return _svd_pipeline
         
     except Exception as e:
         print(f"[ERROR] Failed to load SVD pipeline: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
-def animate_image(image_path, output_path, num_frames=25, fps=7):
+def animate_image(image_path, output_path, num_frames=14, fps=6):
     """
     Animate a static image using Stable Video Diffusion
+    ULTRA-OPTIMIZED FOR RTX 3050 (4GB VRAM)
     
     Args:
         image_path: Path to input image
         output_path: Path to save output video
-        num_frames: Number of frames to generate (default 25 = ~3.5 sec)
-        fps: Frames per second (default 7)
+        num_frames: Number of frames (14 for SVD-XT)
+        fps: Frames per second (6 for smooth motion)
     
     Returns:
-        dict: {"success": bool, "path": str, "duration": float, "error": str}
+        dict: {"success": bool, "path": str, "duration": float, "method": str}
     """
     try:
         # Load pipeline
         pipe = load_svd_pipeline()
         if pipe is None:
-            return {
-                "success": False,
-                "error": "SVD pipeline not available"
-            }
+            print("[SVD] Pipeline not available, using Ken Burns fallback")
+            return ken_burns_effect(image_path, output_path)
         
         print(f"[SVD] Animating image: {image_path}")
         
         # Load and prepare image
-        image = Image.open(image_path).convert("RGB")
+        from PIL import Image as PILImage
+        image = PILImage.open(image_path).convert("RGB")
         
-        # Resize to optimal size for SVD (width must be divisible by 8)
-        # Use 1024x576 for quality, or 512x288 for speed
-        target_size = (1024, 576)  # 16:9 aspect ratio
-        image = image.resize(target_size, Image.LANCZOS)
+        # CRITICAL: TINY resolution for RTX 3050
+        # 320x180 is safest for 4GB VRAM
+        target_width = 320
+        target_height = 180
+        image = image.resize((target_width, target_height), PILImage.LANCZOS)
         
-        # Generate video frames
-        print(f"[SVD] Generating {num_frames} frames...")
-        frames = pipe(
-            image, 
-            num_frames=num_frames,
-            decode_chunk_size=8,  # Lower = less VRAM, slower
-            fps=fps
-        ).frames[0]
+        # FORCE 14 frames (SVD-XT requirement)
+        num_frames = 14
+        
+        print(f"[SVD] Resolution: {target_width}x{target_height}")
+        print(f"[SVD] Frames: {num_frames} @ {fps}fps")
+        print(f"[SVD] Estimated time: 2-4 minutes on RTX 3050...")
+        
+        # Clear CUDA cache before generation
+        torch.cuda.empty_cache()
+        
+        # Generate with MINIMAL settings
+        with torch.inference_mode():
+            frames = pipe(
+                image,
+                height=target_height,
+                width=target_width,
+                num_frames=14,  # Fixed for SVD-XT
+                decode_chunk_size=2,  # Minimal - critical for 4GB
+                num_inference_steps=25,  # Default
+                motion_bucket_id=127,  # Default motion amount
+                fps=fps
+            ).frames[0]
+        
+        # Clear cache after generation
+        torch.cuda.empty_cache()
         
         # Convert frames to video
-        print(f"[SVD] Encoding video...")
-        height, width = frames[0].size
+        print(f"[SVD] Encoding video to {output_path}...")
         
-        # Use H264 codec for better compatibility
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        
+        # Use H264 codec for compatibility
         fourcc = cv2.VideoWriter_fourcc(*'avc1')
-        video = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        video = cv2.VideoWriter(
+            output_path, 
+            fourcc, 
+            fps, 
+            (target_width, target_height)
+        )
         
-        for frame in frames:
+        if not video.isOpened():
+            raise RuntimeError(f"Failed to open video writer for {output_path}")
+        
+        for idx, frame in enumerate(frames):
+            # Convert PIL to numpy array
             frame_array = np.array(frame)
+            # Convert RGB to BGR for OpenCV
             frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
             video.write(frame_bgr)
         
         video.release()
         
         duration = num_frames / fps
-        print(f"[SVD] ✅ Video saved: {output_path} ({duration}s)")
+        print(f"[SVD] ✅ Video saved: {output_path} ({duration:.1f}s, {num_frames} frames)")
         
         return {
             "success": True,
             "path": output_path,
             "duration": duration,
             "frames": num_frames,
-            "fps": fps
+            "fps": fps,
+            "method": "svd",
+            "resolution": f"{target_width}x{target_height}"
         }
         
     except torch.cuda.OutOfMemoryError:
-        return {
-            "success": False,
-            "error": "GPU out of memory. Try reducing image size or num_frames."
-        }
+        print("[ERROR] GPU out of memory! Falling back to Ken Burns...")
+        torch.cuda.empty_cache()
+        return ken_burns_effect(image_path, output_path)
+        
+    except RuntimeError as e:
+        if "CUDA" in str(e) or "out of memory" in str(e).lower():
+            print(f"[ERROR] CUDA error: {e}")
+            print("[INFO] Falling back to Ken Burns...")
+            torch.cuda.empty_cache()
+            return ken_burns_effect(image_path, output_path)
+        raise
+        
     except Exception as e:
         print(f"[ERROR] SVD animation failed: {e}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        import traceback
+        traceback.print_exc()
+        print("[INFO] Falling back to Ken Burns...")
+        return ken_burns_effect(image_path, output_path)
 
 
-def is_svd_available():
-    """Check if SVD can be loaded"""
-    try:
-        if not torch.cuda.is_available():
-            return False
-        pipe = load_svd_pipeline()
-        return pipe is not None
-    except:
-        return False
-
-
-# For backward compatibility - Ken Burns effect (fallback if SVD unavailable)
-def ken_burns_effect(image_path, output_path, duration=3, fps=25):
+def ken_burns_effect(image_path, output_path, duration=2.0, fps=25):
     """
-    Simple zoom/pan effect on static image
-    Fallback if SVD is not available
+    Create Ken Burns effect (zoom + pan) as fallback
+    INSTANT - no GPU required
+    
+    Args:
+        image_path: Path to input image
+        output_path: Path to save output video
+        duration: Duration in seconds
+        fps: Frames per second
+    
+    Returns:
+        dict: {"success": bool, "path": str, "duration": float, "method": str}
     """
     try:
-        from moviepy.editor import ImageClip
+        print(f"[KEN BURNS] Creating zoom/pan effect for {image_path}")
         
-        clip = ImageClip(image_path).set_duration(duration)
+        # Load image
+        img = cv2.imread(image_path)
+        if img is None:
+            raise ValueError(f"Could not load image: {image_path}")
         
-        # Add zoom effect
-        clip = clip.resize(lambda t: 1 + 0.1 * (t / duration))
+        height, width = img.shape[:2]
+        num_frames = int(duration * fps)
         
-        clip.write_videofile(
-            output_path,
-            fps=fps,
-            codec='libx264',
-            audio=False,
-            logger=None
-        )
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        
+        # Create video writer
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')
+        video = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        
+        if not video.isOpened():
+            raise RuntimeError(f"Failed to open video writer for {output_path}")
+        
+        # Generate frames with zoom effect
+        for i in range(num_frames):
+            progress = i / num_frames
+            
+            # Zoom in from 1.0 to 1.2
+            zoom = 1.0 + (0.2 * progress)
+            
+            # Calculate crop region
+            new_width = int(width / zoom)
+            new_height = int(height / zoom)
+            
+            x_offset = int((width - new_width) * progress)
+            y_offset = int((height - new_height) * 0.5)
+            
+            # Crop and resize
+            cropped = img[
+                y_offset:y_offset + new_height,
+                x_offset:x_offset + new_width
+            ]
+            frame = cv2.resize(cropped, (width, height))
+            
+            video.write(frame)
+        
+        video.release()
+        
+        print(f"[KEN BURNS] ✅ Video saved: {output_path} ({duration}s)")
         
         return {
             "success": True,
             "path": output_path,
             "duration": duration,
+            "frames": num_frames,
+            "fps": fps,
             "method": "ken_burns"
         }
+        
     except Exception as e:
+        print(f"[ERROR] Ken Burns effect failed: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             "success": False,
             "error": str(e)
         }
+
+
+if __name__ == "__main__":
+    # Test script
+    print("Testing SVD availability...")
+    available = is_svd_available()
+    print(f"SVD Available: {available}")
+    
+    if available:
+        print("\n✅ SVD is ready to use!")
+        print("Resolution: 320x180 (optimized for RTX 3050)")
+        print("Expected time: 2-4 minutes per animation")
+    else:
+        print("\n⚠️ SVD not available, will use Ken Burns effect")

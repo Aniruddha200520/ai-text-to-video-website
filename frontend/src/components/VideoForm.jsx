@@ -90,6 +90,8 @@ export default function VideoCreator() {
   const [svdAvailable, setSvdAvailable] = useState(false);
   const [animateImages, setAnimateImages] = useState(false);
   const [sceneTypes, setSceneTypes] = useState({}); // {scene_id: 'image' | 'video'}
+  const [stockMediaType, setStockMediaType] = useState('image'); // 'image' or 'video'
+  const [animating, setAnimating] = useState(new Set()); // Track animating scenes
   const [musicVolume, setMusicVolume] = useState(10);
 
   const totalDur = scenes.reduce((sum, s) => sum + (parseFloat(s.duration) || 0), 0);
@@ -299,10 +301,15 @@ export default function VideoCreator() {
   const searchStock = async (q) => {
     if (!q.trim()) return;
     setLoadingStock(true);
-    setStatus('🔍 Searching stock...');
+    setStatus(`🔍 Searching stock ${stockMediaType}s...`);
     
     try {
-      const url = `${API}/api/stock_search?query=${encodeURIComponent(q)}`;
+      // Use different endpoint based on media type
+      const endpoint = stockMediaType === 'video' 
+        ? `/api/search_pexels_videos?query=${encodeURIComponent(q)}`
+        : `/api/stock_search?query=${encodeURIComponent(q)}`;
+      
+      const url = `${API}${endpoint}`;
       console.log('🔍 Searching:', url);
       
       const res = await fetchAPI(url);
@@ -312,7 +319,7 @@ export default function VideoCreator() {
       
       if (data.success && data.results) {
         setStockResults(data.results);
-        setStatus(data.results.length > 0 ? `✅ Found ${data.results.length} results` : '❌ No results');
+        setStatus(data.results.length > 0 ? `✅ Found ${data.results.length} ${stockMediaType}s` : '❌ No results');
       } else {
         setStockResults([]);
         setStatus('❌ No results');
@@ -334,7 +341,10 @@ export default function VideoCreator() {
       setStatus('📥 Downloading...');
       console.log('📥 Downloading stock media:', media);
       
-      const res = await fetchAPI(`${API}/api/download_stock`, {
+      // Use different endpoint for videos
+      const endpoint = stockMediaType === 'video' ? '/api/download_pexels_video' : '/api/download_stock';
+      
+      const res = await fetchAPI(`${API}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -354,6 +364,9 @@ export default function VideoCreator() {
         if (data.url) {
           update(selectedForStock, 'preview_url', `${API}${data.url}`);
         }
+        // Mark source
+        update(selectedForStock, 'image_source', 'pexels');
+        update(selectedForStock, 'is_animated', stockMediaType === 'video');
         setStatus('✅ Applied!');
         setShowStock(false);
       } else {
@@ -363,6 +376,80 @@ export default function VideoCreator() {
       console.error('Stock apply error:', err);
       setStatus(`❌ Failed: ${err.message}`);
     }
+  };
+
+  // ========== NEW: Animate single scene ==========
+  const animateSingle = async (idx) => {
+    const s = scenes[idx];
+    
+    if (!s.background_path) {
+      setStatus('❌ Generate or add image first!');
+      return;
+    }
+    
+    if (s.is_animated) {
+      setStatus('ℹ️ Already animated!');
+      return;
+    }
+    
+    setAnimating(prev => new Set(prev).add(idx));
+    setStatus(`🎬 Animating scene ${idx + 1}...`);
+    
+    try {
+      const res = await fetchAPI(`${API}/api/animate_image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_path: s.background_path,
+          scene_id: s.id,
+          use_svd: svdAvailable
+        })
+      });
+      
+      const data = await res.json();
+      console.log('🎬 Animate response:', data);
+      
+      if (data.success) {
+        update(idx, 'background_path', data.path);
+        update(idx, 'preview_url', `${API}${data.url}`);
+        update(idx, 'is_animated', true);
+        setStatus(`✅ Scene ${idx + 1} animated! (${data.method})`);
+      } else {
+        setStatus(`❌ Animation failed: ${data.error}`);
+      }
+    } catch (err) {
+      console.error('Animation error:', err);
+      setStatus(`❌ Failed: ${err.message}`);
+    } finally {
+      setAnimating(prev => {
+        const n = new Set(prev);
+        n.delete(idx);
+        return n;
+      });
+    }
+  };
+
+  // ========== NEW: Animate all scenes ==========
+  const animateAll = async () => {
+    const scenesWithImages = scenes.filter(s => s.background_path && !s.is_animated);
+    
+    if (scenesWithImages.length === 0) {
+      setStatus('❌ No images to animate! Generate images first.');
+      return;
+    }
+    
+    setLoading(true);
+    setStatus(`🎬 Animating ${scenesWithImages.length} scenes...`);
+    
+    for (let i = 0; i < scenes.length; i++) {
+      const s = scenes[i];
+      if (s.background_path && !s.is_animated) {
+        await animateSingle(i);
+      }
+    }
+    
+    setLoading(false);
+    setStatus(`✅ All scenes animated!`);
   };
 
   // ========== FIXED: Retry with proper URL handling ==========
@@ -740,18 +827,7 @@ export default function VideoCreator() {
                 <div className="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-purple-500/30">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="text-xl font-semibold">Scenes ({scenes.length})</h3>
-                    <div className="flex items-center space-x-3">
-                      {svdAvailable && (
-                        <label className="flex items-center space-x-2 bg-slate-700/50 px-3 py-2 rounded-lg text-sm cursor-pointer hover:bg-slate-700/70 transition-all">
-                          <input
-                            type="checkbox"
-                            checked={animateImages}
-                            onChange={(e) => setAnimateImages(e.target.checked)}
-                            className="w-4 h-4 text-purple-500 bg-slate-600 border-slate-500 rounded focus:ring-purple-500"
-                          />
-                          <span className="text-xs">🎬 Animate</span>
-                        </label>
-                      )}
+                    <div className="flex items-center space-x-2">
                       <button 
                         onClick={() => setShowBulk(true)} 
                         className="bg-blue-500/20 hover:bg-blue-500/30 px-3 py-2 rounded-lg text-sm transition-all"
@@ -772,6 +848,13 @@ export default function VideoCreator() {
                         className="bg-gradient-to-r from-pink-500 to-purple-500 hover:from-pink-600 hover:to-purple-600 disabled:opacity-50 px-4 py-2 rounded-lg transition-all"
                       >
                         🎨 Generate All
+                      </button>
+                      <button
+                        onClick={animateAll}
+                        disabled={loading}
+                        className="bg-gradient-to-r from-green-500 to-teal-500 hover:from-green-600 hover:to-teal-600 disabled:opacity-50 px-4 py-2 rounded-lg transition-all"
+                      >
+                        🎬 Animate All
                       </button>
                     </div>
                   </div>
@@ -879,6 +962,16 @@ export default function VideoCreator() {
                               <RefreshCw size={12} className={retrying.has(i) ? "animate-spin" : ""} />
                               <span>AI</span>
                             </button>
+                            {s.background_path && !s.is_animated && (
+                              <button
+                                onClick={() => animateSingle(i)}
+                                disabled={animating.has(i)}
+                                className="flex items-center space-x-2 bg-green-500/20 hover:bg-green-500/30 px-3 py-1 rounded text-xs disabled:opacity-50 transition-all"
+                              >
+                                <Play size={12} className={animating.has(i) ? "animate-pulse" : ""} />
+                                <span>{animating.has(i) ? 'Animating...' : 'Animate'}</span>
+                              </button>
+                            )}
                           </div>
                           {s.background_path && (
                             <div className="flex items-center justify-between bg-green-500/10 px-3 py-2 rounded border border-green-500/30">
@@ -1231,6 +1324,31 @@ export default function VideoCreator() {
                 <X size={24} />
               </button>
             </div>
+            
+            {/* Image/Video Toggle */}
+            <div className="flex items-center space-x-2 mb-4">
+              <button
+                onClick={() => setStockMediaType('image')}
+                className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-all ${
+                  stockMediaType === 'image'
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-slate-700/50 text-slate-400 hover:bg-slate-700'
+                }`}
+              >
+                📸 Images
+              </button>
+              <button
+                onClick={() => setStockMediaType('video')}
+                className={`flex-1 py-2 px-4 rounded-lg font-semibold transition-all ${
+                  stockMediaType === 'video'
+                    ? 'bg-purple-500 text-white'
+                    : 'bg-slate-700/50 text-slate-400 hover:bg-slate-700'
+                }`}
+              >
+                🎬 Videos
+              </button>
+            </div>
+            
             <div className="flex space-x-2 mb-6">
               <div className="flex-1 relative">
                 <input
@@ -1239,7 +1357,7 @@ export default function VideoCreator() {
                   onChange={(e) => setStockQuery(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && searchStock(stockQuery)}
                   className="w-full bg-slate-700/50 border border-slate-600 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none transition-colors"
-                  placeholder="Search for stock images..."
+                  placeholder={`Search for stock ${stockMediaType}s...`}
                 />
               </div>
               <button
