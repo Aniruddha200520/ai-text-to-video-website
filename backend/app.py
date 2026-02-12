@@ -19,8 +19,7 @@ import requests
 from PIL import Image
 from io import BytesIO
 
-# ========== NEW: SVD AND PEXELS IMPORTS ==========
-from svd_animator import animate_image, is_svd_available, ken_burns_effect
+# ========== PEXELS IMPORTS ==========
 from pexels_api import (
     search_pexels_images, 
     search_pexels_videos,
@@ -182,7 +181,7 @@ def api_upload_background():
             "url": f"/api/uploads/{filename}"
         })
 
-# ========== NEW: SERVE UPLOADED FILES ==========
+# ========== SERVE UPLOADED FILES ==========
 @app.route("/api/uploads/<filename>", methods=["GET", "OPTIONS"])
 def serve_upload(filename):
     """Serve uploaded files"""
@@ -651,62 +650,17 @@ def root():
         "cors": "enabled"
     })
 
-# ========== NEW ENDPOINTS: SVD ANIMATION & PEXELS ==========
-
-@app.route("/api/animate_image", methods=["POST", "OPTIONS"])
-def animate_image_endpoint():
-    """Animate a static image using SVD or Ken Burns fallback"""
-    if request.method == "OPTIONS":
-        return "", 200
-    
-    try:
-        data = request.json
-        image_path = data.get("image_path")
-        scene_id = data.get("scene_id", "scene")
-        use_svd = data.get("use_svd", True)
-        
-        if not image_path or not os.path.exists(image_path):
-            return jsonify({"success": False, "error": "Image not found"}), 400
-        
-        output_filename = f"{scene_id}_animated.mp4"
-        output_path = os.path.join(UPLOADS, output_filename)
-        
-        if use_svd and is_svd_available():
-            print("[INFO] Using Stable Video Diffusion")
-            result = animate_image(image_path, output_path)
-        else:
-            print("[INFO] Using Ken Burns effect")
-            result = ken_burns_effect(image_path, output_path)
-        
-        if result["success"]:
-            return jsonify({
-                "success": True,
-                "path": output_path,
-                "url": f"/api/uploads/{output_filename}",
-                "filename": output_filename,
-                "duration": result.get("duration", 3),
-                "method": result.get("method", "svd")
-            })
-        else:
-            return jsonify(result), 500
-            
-    except Exception as e:
-        print(f"[ERROR] Animation failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
-
+# ========== PEXELS ENDPOINTS ==========
 
 @app.route("/api/generate_images_v2", methods=["POST", "OPTIONS"])
 def generate_images_v2():
-    """Smart image generation with Cloudflare → Pexels fallback + optional animation"""
+    """Smart image generation with Cloudflare → Pexels fallback"""
     if request.method == "OPTIONS":
         return "", 200
     
     try:
         data = request.json
         scenes = data.get("scenes", [])
-        animate = data.get("animate", False)
         
         results = []
         
@@ -755,34 +709,13 @@ def generate_images_v2():
                     })
                     continue
             
-            final_path = result_path
-            final_filename = filename
-            is_animated = False
-            
-            if animate:
-                print(f"[INFO] Animating {scene_id}...")
-                anim_filename = f"{scene_id}_animated.mp4"
-                anim_path = os.path.join(UPLOADS, anim_filename)
-                
-                if is_svd_available():
-                    anim_result = animate_image(result_path, anim_path)
-                else:
-                    anim_result = ken_burns_effect(result_path, anim_path)
-                
-                if anim_result["success"]:
-                    final_path = anim_path
-                    final_filename = anim_filename
-                    is_animated = True
-                    print(f"[OK] Animated: {final_path}")
-            
             results.append({
                 "id": scene_id,
                 "success": True,
-                "background_path": final_path,
-                "url": f"/api/uploads/{final_filename}",
-                "filename": final_filename,
-                "source": source,
-                "animated": is_animated
+                "background_path": result_path,
+                "url": f"/api/uploads/{filename}",
+                "filename": filename,
+                "source": source
             })
         
         return jsonify({"images": results})
@@ -856,17 +789,6 @@ def download_video():
         print(f"[ERROR] Pexels video download failed: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
-
-@app.route("/api/svd_status", methods=["GET", "OPTIONS"])
-def svd_status():
-    """Check if SVD is available"""
-    if request.method == "OPTIONS":
-        return "", 200
-    
-    return jsonify({
-        "available": is_svd_available(),
-        "fallback": "ken_burns"
-    })
 
 if __name__ == "__main__":
     print("\n" + "="*60)

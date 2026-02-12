@@ -42,15 +42,6 @@ export default function VideoCreator() {
       .then(res => res.json())
       .then(data => console.log('✅ API Health Check:', data))
       .catch(err => console.error('❌ API Connection Failed:', err));
-    
-    // Check SVD availability
-    fetchAPI(`${API}/api/svd_status`)
-      .then(res => res.json())
-      .then(data => {
-        setSvdAvailable(data.available);
-        console.log('🎬 SVD Status:', data.available ? 'Available' : 'Not Available');
-      })
-      .catch(err => console.error('❌ SVD Check Failed:', err));
   }, [API]);
   
   const [project, setProject] = useState('my_video');
@@ -87,11 +78,7 @@ export default function VideoCreator() {
   const [loadingStock, setLoadingStock] = useState(false);
   const [selectedForStock, setSelectedForStock] = useState(null);
   const [selectedMusic, setSelectedMusic] = useState(null);
-  const [svdAvailable, setSvdAvailable] = useState(false);
-  const [animateImages, setAnimateImages] = useState(false);
-  const [sceneTypes, setSceneTypes] = useState({}); // {scene_id: 'image' | 'video'}
   const [stockMediaType, setStockMediaType] = useState('image'); // 'image' or 'video'
-  const [animating, setAnimating] = useState(new Set()); // Track animating scenes
   const [musicVolume, setMusicVolume] = useState(10);
 
   const totalDur = scenes.reduce((sum, s) => sum + (parseFloat(s.duration) || 0), 0);
@@ -366,7 +353,6 @@ export default function VideoCreator() {
         }
         // Mark source
         update(selectedForStock, 'image_source', 'pexels');
-        update(selectedForStock, 'is_animated', stockMediaType === 'video');
         setStatus('✅ Applied!');
         setShowStock(false);
       } else {
@@ -376,80 +362,6 @@ export default function VideoCreator() {
       console.error('Stock apply error:', err);
       setStatus(`❌ Failed: ${err.message}`);
     }
-  };
-
-  // ========== NEW: Animate single scene ==========
-  const animateSingle = async (idx) => {
-    const s = scenes[idx];
-    
-    if (!s.background_path) {
-      setStatus('❌ Generate or add image first!');
-      return;
-    }
-    
-    if (s.is_animated) {
-      setStatus('ℹ️ Already animated!');
-      return;
-    }
-    
-    setAnimating(prev => new Set(prev).add(idx));
-    setStatus(`🎬 Animating scene ${idx + 1}...`);
-    
-    try {
-      const res = await fetchAPI(`${API}/api/animate_image`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          image_path: s.background_path,
-          scene_id: s.id,
-          use_svd: svdAvailable
-        })
-      });
-      
-      const data = await res.json();
-      console.log('🎬 Animate response:', data);
-      
-      if (data.success) {
-        update(idx, 'background_path', data.path);
-        update(idx, 'preview_url', `${API}${data.url}`);
-        update(idx, 'is_animated', true);
-        setStatus(`✅ Scene ${idx + 1} animated! (${data.method})`);
-      } else {
-        setStatus(`❌ Animation failed: ${data.error}`);
-      }
-    } catch (err) {
-      console.error('Animation error:', err);
-      setStatus(`❌ Failed: ${err.message}`);
-    } finally {
-      setAnimating(prev => {
-        const n = new Set(prev);
-        n.delete(idx);
-        return n;
-      });
-    }
-  };
-
-  // ========== NEW: Animate all scenes ==========
-  const animateAll = async () => {
-    const scenesWithImages = scenes.filter(s => s.background_path && !s.is_animated);
-    
-    if (scenesWithImages.length === 0) {
-      setStatus('❌ No images to animate! Generate images first.');
-      return;
-    }
-    
-    setLoading(true);
-    setStatus(`🎬 Animating ${scenesWithImages.length} scenes...`);
-    
-    for (let i = 0; i < scenes.length; i++) {
-      const s = scenes[i];
-      if (s.background_path && !s.is_animated) {
-        await animateSingle(i);
-      }
-    }
-    
-    setLoading(false);
-    setStatus(`✅ All scenes animated!`);
   };
 
   // ========== FIXED: Retry with proper URL handling ==========
@@ -491,24 +403,21 @@ export default function VideoCreator() {
     }
   };
 
-  // ========== UPDATED: Generate images with fallback + animation support ==========
+  // ========== Generate images with fallback ==========
   const genImages = async () => {
     if (scenes.length === 0) return;
     setLoading(true);
-    setStatus(animateImages ? '🎬 Generating & animating images...' : '🎨 Generating images...');
+    setStatus('🎨 Generating images...');
     
     try {
       const res = await fetchAPI(`${API}/api/generate_images_v2`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          scenes,
-          animate: animateImages
-        })
+        body: JSON.stringify({ scenes })
       });
       
       const data = await res.json();
-      console.log('🎨 Generate images v2 response:', data);
+      console.log('🎨 Generate images response:', data);
       
       if (data.images) {
         const upd = [...scenes];
@@ -523,7 +432,6 @@ export default function VideoCreator() {
             upd[i].preview_url = img.url ? `${API}${img.url}` : null;
             // Store source info
             upd[i].image_source = img.source; // 'cloudflare' or 'pexels'
-            upd[i].is_animated = img.animated || false;
             cnt++;
           }
         });
@@ -849,13 +757,6 @@ export default function VideoCreator() {
                       >
                         🎨 Generate All
                       </button>
-                      <button
-                        onClick={animateAll}
-                        disabled={loading}
-                        className="bg-gradient-to-r from-green-500 to-teal-500 hover:from-green-600 hover:to-teal-600 disabled:opacity-50 px-4 py-2 rounded-lg transition-all"
-                      >
-                        🎬 Animate All
-                      </button>
                     </div>
                   </div>
 
@@ -962,30 +863,16 @@ export default function VideoCreator() {
                               <RefreshCw size={12} className={retrying.has(i) ? "animate-spin" : ""} />
                               <span>AI</span>
                             </button>
-                            {s.background_path && !s.is_animated && (
-                              <button
-                                onClick={() => animateSingle(i)}
-                                disabled={animating.has(i)}
-                                className="flex items-center space-x-2 bg-green-500/20 hover:bg-green-500/30 px-3 py-1 rounded text-xs disabled:opacity-50 transition-all"
-                              >
-                                <Play size={12} className={animating.has(i) ? "animate-pulse" : ""} />
-                                <span>{animating.has(i) ? 'Animating...' : 'Animate'}</span>
-                              </button>
-                            )}
                           </div>
                           {s.background_path && (
                             <div className="flex items-center justify-between bg-green-500/10 px-3 py-2 rounded border border-green-500/30">
                               <div className="flex items-center space-x-2">
                                 <Check size={12} className="text-green-400" />
                                 <div className="flex flex-col">
-                                  <span className="text-xs text-green-400">
-                                    Background ready
-                                    {s.is_animated && <span className="ml-1">🎬</span>}
-                                  </span>
+                                  <span className="text-xs text-green-400">Background ready</span>
                                   {s.image_source && (
                                     <span className="text-[10px] text-green-300/70">
                                       {s.image_source === 'cloudflare' ? '⚡ Cloudflare' : '📸 Pexels'}
-                                      {s.is_animated && ' • Animated'}
                                     </span>
                                   )}
                                 </div>
@@ -1146,17 +1033,6 @@ export default function VideoCreator() {
             <div className="bg-slate-800/50 backdrop-blur-sm rounded-xl p-6 border border-purple-500/30">
               <h3 className="text-lg font-semibold mb-4">🎨 Visual Settings</h3>
               <div className="space-y-4">
-                {svdAvailable && (
-                  <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-3 mb-4">
-                    <div className="flex items-center space-x-2 text-xs text-green-400">
-                      <Check size={12} />
-                      <span className="font-semibold">GPU Animation Ready</span>
-                    </div>
-                    <p className="text-[10px] text-green-300/70 mt-1">
-                      Stable Video Diffusion available for image animation
-                    </p>
-                  </div>
-                )}
                 <div className="flex items-center justify-between">
                   <span className="text-sm">Auto AI Images</span>
                   <label className="relative inline-flex items-center cursor-pointer">
