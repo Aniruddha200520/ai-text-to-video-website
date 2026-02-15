@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Trash2, Download, Play, Settings, Image, FileText, X, Upload, GripVertical, Copy, RefreshCw, Save, FolderOpen, Music, Volume2, Check } from 'lucide-react';
+import AvatarNarrator from './AvatarNarrator';
+import AvatarSelector from './AvatarSelector';
 
 export default function VideoCreator() {
   // ========== FIXED API URL DETECTION ==========
@@ -80,6 +82,16 @@ export default function VideoCreator() {
   const [selectedMusic, setSelectedMusic] = useState(null);
   const [stockMediaType, setStockMediaType] = useState('image'); // 'image' or 'video'
   const [musicVolume, setMusicVolume] = useState(10);
+  
+  // ========== AVATAR STATE ==========
+  const [useAvatar, setUseAvatar] = useState(false);
+  const [avatarConfig, setAvatarConfig] = useState({
+    url: "/models/business-avatar.fbx",
+    position: "bottom-right",
+    size: "medium",
+    style: "Business Person"
+  });
+  const [showAvatarSelector, setShowAvatarSelector] = useState(false);
 
   const totalDur = scenes.reduce((sum, s) => sum + (parseFloat(s.duration) || 0), 0);
   const totalWords = scenes.reduce((sum, s) => sum + (s.text?.split(' ').length || 0), 0);
@@ -270,9 +282,7 @@ export default function VideoCreator() {
       console.log('📤 Upload response:', data);
       
       if (data.background_path) {
-        // Store local path for rendering
         update(idx, 'background_path', data.background_path);
-        // Store URL for preview
         if (data.url) {
           update(idx, 'preview_url', `${API}${data.url}`);
         }
@@ -284,14 +294,12 @@ export default function VideoCreator() {
     }
   };
 
-  // ========== FIXED: Stock search with better error handling ==========
   const searchStock = async (q) => {
     if (!q.trim()) return;
     setLoadingStock(true);
     setStatus(`🔍 Searching stock ${stockMediaType}s...`);
     
     try {
-      // Use different endpoint based on media type
       const endpoint = stockMediaType === 'video' 
         ? `/api/search_pexels_videos?query=${encodeURIComponent(q)}`
         : `/api/stock_search?query=${encodeURIComponent(q)}`;
@@ -320,7 +328,6 @@ export default function VideoCreator() {
     }
   };
 
-  // ========== FIXED: Stock apply with proper path handling ==========
   const applyStock = async (media) => {
     if (selectedForStock === null) return;
     
@@ -328,7 +335,6 @@ export default function VideoCreator() {
       setStatus('📥 Downloading...');
       console.log('📥 Downloading stock media:', media);
       
-      // Use different endpoint for videos
       const endpoint = stockMediaType === 'video' ? '/api/download_pexels_video' : '/api/download_stock';
       
       const res = await fetchAPI(`${API}${endpoint}`, {
@@ -345,13 +351,10 @@ export default function VideoCreator() {
       console.log('📦 Stock download response:', data);
       
       if (data.success && data.path) {
-        // Store local path for rendering
         update(selectedForStock, 'background_path', data.path);
-        // Store URL for preview
         if (data.url) {
           update(selectedForStock, 'preview_url', `${API}${data.url}`);
         }
-        // Mark source
         update(selectedForStock, 'image_source', 'pexels');
         setStatus('✅ Applied!');
         setShowStock(false);
@@ -364,7 +367,6 @@ export default function VideoCreator() {
     }
   };
 
-  // ========== FIXED: Retry with proper URL handling ==========
   const retry = async (idx) => {
     const s = scenes[idx];
     setRetrying(prev => new Set(prev).add(idx));
@@ -381,9 +383,7 @@ export default function VideoCreator() {
       console.log('🎨 Retry response:', data);
       
       if (data.images && data.images[0].success) {
-        // Store local path for rendering
         update(idx, 'background_path', data.images[0].background_path);
-        // Store URL for preview
         if (data.images[0].url) {
           update(idx, 'preview_url', `${API}${data.images[0].url}`);
         }
@@ -403,7 +403,6 @@ export default function VideoCreator() {
     }
   };
 
-  // ========== Generate images with fallback ==========
   const genImages = async () => {
     if (scenes.length === 0) return;
     setLoading(true);
@@ -426,12 +425,9 @@ export default function VideoCreator() {
         data.images.forEach(img => {
           const i = upd.findIndex(s => s.id === img.id);
           if (i >= 0 && img.success) {
-            // Store local path for backend rendering
             upd[i].background_path = img.background_path;
-            // Store URL for frontend preview
             upd[i].preview_url = img.url ? `${API}${img.url}` : null;
-            // Store source info
-            upd[i].image_source = img.source; // 'cloudflare' or 'pexels'
+            upd[i].image_source = img.source;
             cnt++;
           }
         });
@@ -571,7 +567,7 @@ export default function VideoCreator() {
     const d = {
       version: '1.0',
       project_name: project,
-      settings: { subtitles, subtitleStyle, fontSize, useElevenLabs, autoAI, musicVolume },
+      settings: { subtitles, subtitleStyle, fontSize, useElevenLabs, autoAI, musicVolume, useAvatar, avatarConfig },
       script: text,
       scenes,
       music: selectedMusic
@@ -602,6 +598,8 @@ export default function VideoCreator() {
         setUseElevenLabs(d.settings?.useElevenLabs || false);
         setAutoAI(d.settings?.autoAI ?? true);
         setMusicVolume(d.settings?.musicVolume || 10);
+        setUseAvatar(d.settings?.useAvatar || false);
+        if (d.settings?.avatarConfig) setAvatarConfig(d.settings.avatarConfig);
         setText(d.script || '');
         setScenes(d.scenes || []);
         setSelectedMusic(d.music || null);
@@ -1045,6 +1043,56 @@ export default function VideoCreator() {
                     <div className="w-11 h-6 bg-slate-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
                   </label>
                 </div>
+                
+                {/* AVATAR TOGGLE */}
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">🎭 Avatar Narrator</span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useAvatar}
+                      onChange={(e) => setUseAvatar(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-500"></div>
+                  </label>
+                </div>
+
+                {useAvatar && (
+                  <div className="space-y-3 pl-4 border-l-2 border-purple-500/30">
+                    <button
+                      onClick={() => setShowAvatarSelector(true)}
+                      className="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 px-4 py-2 rounded-lg text-sm font-semibold transition-all"
+                    >
+                      Choose Avatar
+                    </button>
+                    <select
+                      value={avatarConfig.position}
+                      onChange={(e) => setAvatarConfig({...avatarConfig, position: e.target.value})}
+                      className="w-full bg-slate-700/50 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:border-purple-500 focus:outline-none transition-colors"
+                    >
+                      <option value="bottom-right">Bottom Right</option>
+                      <option value="bottom-left">Bottom Left</option>
+                      <option value="top-right">Top Right</option>
+                      <option value="top-left">Top Left</option>
+                    </select>
+                    <select
+                      value={avatarConfig.size}
+                      onChange={(e) => setAvatarConfig({...avatarConfig, size: e.target.value})}
+                      className="w-full bg-slate-700/50 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:border-purple-500 focus:outline-none transition-colors"
+                    >
+                      <option value="small">Small</option>
+                      <option value="medium">Medium</option>
+                      <option value="large">Large</option>
+                    </select>
+                    {avatarConfig.style && (
+                      <div className="text-xs text-green-400 bg-green-500/10 p-2 rounded border border-green-500/30">
+                        ✓ {avatarConfig.style} selected
+                      </div>
+                    )}
+                  </div>
+                )}
+                
                 <div className="flex items-center justify-between">
                   <span className="text-sm">Subtitles</span>
                   <label className="relative inline-flex items-center cursor-pointer">
@@ -1273,6 +1321,29 @@ export default function VideoCreator() {
             )}
           </div>
         </div>
+      )}
+
+      {/* AVATAR NARRATOR */}
+      {useAvatar && videoUrl && (
+        <AvatarNarrator
+          avatarUrl={avatarConfig.url}
+          position={avatarConfig.position}
+          size={avatarConfig.size}
+        />
+      )}
+
+      {/* AVATAR SELECTOR MODAL */}
+      {showAvatarSelector && (
+        <AvatarSelector
+          onSelect={(avatar) => {
+            setAvatarConfig({
+              ...avatarConfig,
+              url: avatar.url,
+              style: avatar.name
+            });
+          }}
+          onClose={() => setShowAvatarSelector(false)}
+        />
       )}
     </div>
   );
