@@ -21,7 +21,6 @@
   },
   "scripts": {
     "dev": "vite",
-    "postinstall": "npm install --legacy-peer-deps",
     "build": "vite build",
     "preview": "vite preview"
   }
