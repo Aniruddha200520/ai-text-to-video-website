@@ -1,27 +1,27 @@
 import React, { useState } from 'react';
 import { X } from 'lucide-react';
 
-// Local Mixamo avatars organized by style (FBX format)
+// Local Mixamo avatars organized by style (GLB format)
 const AVATAR_LIBRARY = {
   professional: [
-    { id: "prof-1", name: "Business Person", url: "/models/business-avatar.fbx" },
-    { id: "prof-2", name: "Executive", url: "/models/executive-avatar.fbx" },
-    { id: "prof-3", name: "Corporate", url: "/models/corporate-avatar.fbx" }
+    { id: "prof-1", name: "Business Person", url: "/models/business-avatar.glb" },
+    { id: "prof-2", name: "Executive", url: "/models/executive-avatar.glb" },
+    { id: "prof-3", name: "Corporate", url: "/models/corporate-avatar.glb" }
   ],
   casual: [
-    { id: "cas-1", name: "Casual Guy", url: "/models/casual-avatar.fbx" },
-    { id: "cas-2", name: "Friendly Girl", url: "/models/friendly-avatar.fbx" },
-    { id: "cas-3", name: "Relaxed", url: "/models/relaxed-avatar.fbx" }
+    { id: "cas-1", name: "Casual Guy", url: "/models/casual-avatar.glb" },
+    { id: "cas-2", name: "Friendly Girl", url: "/models/friendly-avatar.glb" },
+    { id: "cas-3", name: "Relaxed", url: "/models/relaxed-avatar.glb" }
   ],
   modern: [
-    { id: "mod-1", name: "Modern Style", url: "/models/modern-avatar.fbx" },
-    { id: "mod-2", name: "Trendy", url: "/models/trendy-avatar.fbx" },
-    { id: "mod-3", name: "Contemporary", url: "/models/contemporary-avatar.fbx" }
+    { id: "mod-1", name: "Modern Style", url: "/models/modern-avatar.glb" },
+    { id: "mod-2", name: "Trendy", url: "/models/trendy-avatar.glb" },
+    { id: "mod-3", name: "Contemporary", url: "/models/contemporary-avatar.glb" }
   ],
   animated: [
-    { id: "anim-1", name: "Talking Avatar", url: "/models/talking-avatar.fbx" },
-    { id: "anim-2", name: "Gesturing", url: "/models/gesturing-avatar.fbx" },
-    { id: "anim-3", name: "Presenter", url: "/models/presenter-avatar.fbx" }
+    { id: "anim-1", name: "Talking Avatar", url: "/models/talking-avatar.glb" },
+    { id: "anim-2", name: "Gesturing", url: "/models/gesturing-avatar.glb" },
+    { id: "anim-3", name: "Presenter", url: "/models/presenter-avatar.glb" }
   ]
 };
 
@@ -49,7 +49,7 @@ export default function AvatarSelector({ onSelect, onClose }) {
         <div className="flex justify-between items-center mb-6">
           <div>
             <h3 className="text-2xl font-semibold text-white">Choose Avatar Narrator</h3>
-            <p className="text-sm text-slate-400 mt-1">Mixamo 3D Characters (FBX)</p>
+            <p className="text-sm text-slate-400 mt-1">Mixamo 3D Characters (GLB)</p>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white transition-colors">
             <X size={24} />
@@ -107,10 +107,10 @@ export default function AvatarSelector({ onSelect, onClose }) {
         
         <div className="bg-blue-500/10 rounded-lg p-4 mb-6 border border-blue-500/30">
           <p className="text-sm text-blue-300 mb-2 font-semibold">
-            📥 Download from Mixamo
+            📥 Using GLB Format
           </p>
           <p className="text-xs text-slate-400">
-            Get free FBX characters from <span className="text-purple-400 font-semibold">Mixamo.com</span> → Download as <span className="text-green-400 font-semibold">FBX Binary</span> → Place in <code className="bg-slate-900/50 px-2 py-1 rounded">/public/models/</code>
+            GLB files from <span className="text-purple-400 font-semibold">Mixamo.com</span> → Convert FBX to GLB → Place in <code className="bg-slate-900/50 px-2 py-1 rounded">/public/models/</code>
           </p>
         </div>
         
