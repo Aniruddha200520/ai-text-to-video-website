@@ -1,30 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Trash2, Download, Play, Settings, Image, FileText, X, Upload, GripVertical, Copy, RefreshCw, Save, FolderOpen, Music, Volume2, Check } from 'lucide-react';
-import AvatarNarrator from './AvatarNarrator';
-import AvatarSelector from './AvatarSelector';
 
 export default function VideoCreator() {
-  // ========== FIXED API URL DETECTION ==========
+  // ========== API URL DETECTION ==========
   const getApiUrl = () => {
-    // Check if we're in production (Vercel)
     if (typeof window !== 'undefined') {
       const hostname = window.location.hostname;
-      
-      // If running on localhost, use env variable or default
       if (hostname === 'localhost' || hostname === '127.0.0.1') {
         return import.meta.env.VITE_API_URL || 'http://localhost:5001';
       }
-      
-      // In production, use the env variable (your ngrok URL)
       return import.meta.env.VITE_API_URL || 'http://localhost:5001';
     }
-    
     return 'http://localhost:5001';
   };
   
   const API = getApiUrl();
   
-  // ========== NGROK FIX: Helper function to add ngrok header to all requests ==========
+  // ========== NGROK FIX ==========
   const fetchAPI = (url, options = {}) => {
     return fetch(url, {
       ...options,
@@ -35,11 +27,8 @@ export default function VideoCreator() {
     });
   };
   
-  // Log API URL for debugging
   useEffect(() => {
     console.log('🔗 API URL:', API);
-    
-    // Test API connection
     fetchAPI(`${API}/api/health`)
       .then(res => res.json())
       .then(data => console.log('✅ API Health Check:', data))
@@ -80,18 +69,8 @@ export default function VideoCreator() {
   const [loadingStock, setLoadingStock] = useState(false);
   const [selectedForStock, setSelectedForStock] = useState(null);
   const [selectedMusic, setSelectedMusic] = useState(null);
-  const [stockMediaType, setStockMediaType] = useState('image'); // 'image' or 'video'
+  const [stockMediaType, setStockMediaType] = useState('image');
   const [musicVolume, setMusicVolume] = useState(10);
-  
-  // ========== AVATAR STATE ==========
-  const [useAvatar, setUseAvatar] = useState(false);
-  const [avatarConfig, setAvatarConfig] = useState({
-    url: "/models/business-avatar.fbx",
-    position: "bottom-right",
-    size: "medium",
-    style: "Business Person"
-  });
-  const [showAvatarSelector, setShowAvatarSelector] = useState(false);
 
   const totalDur = scenes.reduce((sum, s) => sum + (parseFloat(s.duration) || 0), 0);
   const totalWords = scenes.reduce((sum, s) => sum + (s.text?.split(' ').length || 0), 0);
@@ -106,7 +85,6 @@ export default function VideoCreator() {
     setEstimatedTime(est);
   }, [scenes.length]);
 
-  // ========== FIXED: Enhanced loadVoices with better error handling ==========
   const loadVoices = async () => {
     if (voicesLoading || voicesLoaded) {
       console.log('⏭️ Skipping voice load (already loading or loaded)');
@@ -567,7 +545,7 @@ export default function VideoCreator() {
     const d = {
       version: '1.0',
       project_name: project,
-      settings: { subtitles, subtitleStyle, fontSize, useElevenLabs, autoAI, musicVolume, useAvatar, avatarConfig },
+      settings: { subtitles, subtitleStyle, fontSize, useElevenLabs, autoAI, musicVolume },
       script: text,
       scenes,
       music: selectedMusic
@@ -598,8 +576,6 @@ export default function VideoCreator() {
         setUseElevenLabs(d.settings?.useElevenLabs || false);
         setAutoAI(d.settings?.autoAI ?? true);
         setMusicVolume(d.settings?.musicVolume || 10);
-        setUseAvatar(d.settings?.useAvatar || false);
-        if (d.settings?.avatarConfig) setAvatarConfig(d.settings.avatarConfig);
         setText(d.script || '');
         setScenes(d.scenes || []);
         setSelectedMusic(d.music || null);
@@ -1044,55 +1020,6 @@ export default function VideoCreator() {
                   </label>
                 </div>
                 
-                {/* AVATAR TOGGLE */}
-                <div className="flex items-center justify-between">
-                  <span className="text-sm">🎭 Avatar Narrator</span>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={useAvatar}
-                      onChange={(e) => setUseAvatar(e.target.checked)}
-                      className="sr-only peer"
-                    />
-                    <div className="w-11 h-6 bg-slate-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-500"></div>
-                  </label>
-                </div>
-
-                {useAvatar && (
-                  <div className="space-y-3 pl-4 border-l-2 border-purple-500/30">
-                    <button
-                      onClick={() => setShowAvatarSelector(true)}
-                      className="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 px-4 py-2 rounded-lg text-sm font-semibold transition-all"
-                    >
-                      Choose Avatar
-                    </button>
-                    <select
-                      value={avatarConfig.position}
-                      onChange={(e) => setAvatarConfig({...avatarConfig, position: e.target.value})}
-                      className="w-full bg-slate-700/50 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:border-purple-500 focus:outline-none transition-colors"
-                    >
-                      <option value="bottom-right">Bottom Right</option>
-                      <option value="bottom-left">Bottom Left</option>
-                      <option value="top-right">Top Right</option>
-                      <option value="top-left">Top Left</option>
-                    </select>
-                    <select
-                      value={avatarConfig.size}
-                      onChange={(e) => setAvatarConfig({...avatarConfig, size: e.target.value})}
-                      className="w-full bg-slate-700/50 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:border-purple-500 focus:outline-none transition-colors"
-                    >
-                      <option value="small">Small</option>
-                      <option value="medium">Medium</option>
-                      <option value="large">Large</option>
-                    </select>
-                    {avatarConfig.style && (
-                      <div className="text-xs text-green-400 bg-green-500/10 p-2 rounded border border-green-500/30">
-                        ✓ {avatarConfig.style} selected
-                      </div>
-                    )}
-                  </div>
-                )}
-                
                 <div className="flex items-center justify-between">
                   <span className="text-sm">Subtitles</span>
                   <label className="relative inline-flex items-center cursor-pointer">
@@ -1249,7 +1176,6 @@ export default function VideoCreator() {
               </button>
             </div>
             
-            {/* Image/Video Toggle */}
             <div className="flex items-center space-x-2 mb-4">
               <button
                 onClick={() => setStockMediaType('image')}
@@ -1321,29 +1247,6 @@ export default function VideoCreator() {
             )}
           </div>
         </div>
-      )}
-
-      {/* AVATAR NARRATOR */}
-      {useAvatar && videoUrl && (
-        <AvatarNarrator
-          avatarUrl={avatarConfig.url}
-          position={avatarConfig.position}
-          size={avatarConfig.size}
-        />
-      )}
-
-      {/* AVATAR SELECTOR MODAL */}
-      {showAvatarSelector && (
-        <AvatarSelector
-          onSelect={(avatar) => {
-            setAvatarConfig({
-              ...avatarConfig,
-              url: avatar.url,
-              style: avatar.name
-            });
-          }}
-          onClose={() => setShowAvatarSelector(false)}
-        />
       )}
     </div>
   );
