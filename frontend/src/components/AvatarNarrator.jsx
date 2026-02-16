@@ -2,35 +2,40 @@ import React, { useRef, useEffect, useState, Suspense } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { useGLTF, useAnimations } from '@react-three/drei';
 
-// Loading fallback
-function LoadingSpinner() {
+// Simple loading component
+function Loader() {
   return (
     <mesh>
-      <boxGeometry args={[0.5, 0.5, 0.5]} />
-      <meshStandardMaterial color="#a78bfa" />
+      <sphereGeometry args={[0.3, 16, 16]} />
+      <meshStandardMaterial color="#a78bfa" wireframe />
     </mesh>
   );
 }
 
-// Avatar Model Component with GLB
+// Avatar Model Component
 function AvatarModel({ avatarUrl, isTalking }) {
   const group = useRef();
-  const { scene, animations } = useGLTF(avatarUrl);
-  const { actions } = useAnimations(animations, group);
+  const gltf = useGLTF(avatarUrl);
+  const { actions, mixer } = useAnimations(gltf.animations, group);
   
-  // Play talking animation when audio is active
+  // Play animation when talking
   useEffect(() => {
-    if (actions && Object.keys(actions).length > 0) {
-      const firstAnimation = Object.values(actions)[0];
-      if (isTalking) {
-        firstAnimation?.play();
-      } else {
-        firstAnimation?.stop();
+    if (!mixer || !actions) return;
+    
+    const actionNames = Object.keys(actions);
+    if (actionNames.length > 0) {
+      const action = actions[actionNames[0]];
+      if (action) {
+        if (isTalking) {
+          action.play();
+        } else {
+          action.stop();
+        }
       }
     }
-  }, [isTalking, actions]);
+  }, [isTalking, actions, mixer]);
   
-  // Subtle idle animation when not talking
+  // Idle animation
   useFrame((state) => {
     if (group.current && !isTalking) {
       const time = state.clock.getElapsedTime();
@@ -42,66 +47,68 @@ function AvatarModel({ avatarUrl, isTalking }) {
   return (
     <primitive 
       ref={group} 
-      object={scene} 
+      object={gltf.scene} 
       scale={1.8}
       position={[0, -1.2, 0]}
-      rotation={[0, 0, 0]}
     />
   );
+}
+
+// Error Boundary Component
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Avatar Error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#ff6b6b',
+          fontSize: '12px',
+          textAlign: 'center',
+          padding: '20px'
+        }}>
+          Avatar unavailable
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
 }
 
 // Main Avatar Narrator Component
 export default function AvatarNarrator({ 
   avatarUrl = "/models/business-avatar.glb",
   position = "bottom-right",
-  size = "medium",
-  audioElement = null
+  size = "medium"
 }) {
   const [isTalking, setIsTalking] = useState(false);
   const [visible, setVisible] = useState(true);
   
-  // Detect audio playing via volume detection
+  // Simulate talking (since audio detection is complex)
   useEffect(() => {
-    if (!audioElement) return;
+    const interval = setInterval(() => {
+      setIsTalking(prev => !prev);
+    }, 2000);
     
-    let animationId;
-    let audioContext;
-    let analyser;
-    let source;
-    
-    try {
-      audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      analyser = audioContext.createAnalyser();
-      
-      // Check if source already exists
-      if (!audioElement.connectedSource) {
-        source = audioContext.createMediaElementSource(audioElement);
-        audioElement.connectedSource = source;
-        source.connect(analyser);
-        analyser.connect(audioContext.destination);
-      } else {
-        source = audioElement.connectedSource;
-      }
-      
-      analyser.fftSize = 256;
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
-      
-      const checkAudio = () => {
-        analyser.getByteFrequencyData(dataArray);
-        const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-        setIsTalking(average > 5);
-        animationId = requestAnimationFrame(checkAudio);
-      };
-      
-      checkAudio();
-    } catch (error) {
-      console.error("Audio context error:", error);
-    }
-    
-    return () => {
-      if (animationId) cancelAnimationFrame(animationId);
-    };
-  }, [audioElement]);
+    return () => clearInterval(interval);
+  }, []);
   
   const positions = {
     "bottom-right": { bottom: "20px", right: "20px" },
@@ -119,100 +126,78 @@ export default function AvatarNarrator({
   if (!visible) return null;
   
   return (
-    <div 
-      style={{
-        position: "fixed",
-        ...positions[position],
-        ...sizes[size],
-        zIndex: 1000,
-        background: "linear-gradient(135deg, rgba(100, 50, 150, 0.85), rgba(50, 20, 100, 0.85))",
-        borderRadius: "20px",
-        border: "2px solid rgba(150, 100, 255, 0.6)",
-        backdropFilter: "blur(10px)",
-        boxShadow: "0 10px 40px rgba(0, 0, 0, 0.4)",
-        overflow: "hidden"
-      }}
-    >
-      <button
-        onClick={() => setVisible(false)}
+    <ErrorBoundary>
+      <div 
         style={{
-          position: "absolute",
-          top: "8px",
-          right: "8px",
-          background: "rgba(255, 255, 255, 0.2)",
-          border: "none",
-          borderRadius: "50%",
-          width: "28px",
-          height: "28px",
-          cursor: "pointer",
-          color: "white",
-          fontSize: "18px",
-          fontWeight: "bold",
-          zIndex: 10,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          transition: "all 0.2s"
+          position: "fixed",
+          ...positions[position],
+          ...sizes[size],
+          zIndex: 1000,
+          background: "linear-gradient(135deg, rgba(100, 50, 150, 0.85), rgba(50, 20, 100, 0.85))",
+          borderRadius: "20px",
+          border: "2px solid rgba(150, 100, 255, 0.6)",
+          backdropFilter: "blur(10px)",
+          boxShadow: "0 10px 40px rgba(0, 0, 0, 0.4)",
+          overflow: "hidden"
         }}
-        onMouseEnter={(e) => e.target.style.background = "rgba(255, 255, 255, 0.3)"}
-        onMouseLeave={(e) => e.target.style.background = "rgba(255, 255, 255, 0.2)"}
       >
-        ×
-      </button>
-      
-      {isTalking && (
-        <div
+        <button
+          onClick={() => setVisible(false)}
           style={{
             position: "absolute",
             top: "8px",
-            left: "8px",
-            background: "rgba(0, 255, 100, 0.2)",
-            border: "2px solid rgba(0, 255, 100, 0.7)",
-            borderRadius: "20px",
-            padding: "4px 10px",
-            fontSize: "11px",
+            right: "8px",
+            background: "rgba(255, 255, 255, 0.2)",
+            border: "none",
+            borderRadius: "50%",
+            width: "28px",
+            height: "28px",
+            cursor: "pointer",
             color: "white",
-            fontWeight: "600",
-            animation: "pulse 1.5s ease-in-out infinite",
+            fontSize: "18px",
+            fontWeight: "bold",
+            zIndex: 10,
             display: "flex",
             alignItems: "center",
-            gap: "5px"
+            justifyContent: "center"
           }}
         >
-          <span style={{ fontSize: "14px" }}>🎙️</span>
-          Speaking
-        </div>
-      )}
-      
-      <Canvas
-        camera={{ position: [0, 1.5, 3], fov: 45 }}
-        style={{ width: "100%", height: "100%" }}
-      >
-        <ambientLight intensity={0.7} />
-        <directionalLight position={[5, 5, 5]} intensity={1.2} />
-        <pointLight position={[-5, 5, -5]} intensity={0.6} color="#a78bfa" />
-        <spotLight position={[0, 5, 0]} intensity={0.5} angle={0.6} penumbra={1} color="#818cf8" />
+          ×
+        </button>
         
-        <Suspense fallback={<LoadingSpinner />}>
-          <AvatarModel avatarUrl={avatarUrl} isTalking={isTalking} />
-        </Suspense>
-      </Canvas>
-      
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { 
-            opacity: 1;
-            transform: scale(1);
-          }
-          50% { 
-            opacity: 0.7;
-            transform: scale(0.98);
-          }
-        }
-      `}</style>
-    </div>
+        {isTalking && (
+          <div
+            style={{
+              position: "absolute",
+              top: "8px",
+              left: "8px",
+              background: "rgba(0, 255, 100, 0.2)",
+              border: "2px solid rgba(0, 255, 100, 0.7)",
+              borderRadius: "20px",
+              padding: "4px 10px",
+              fontSize: "11px",
+              color: "white",
+              fontWeight: "600"
+            }}
+          >
+            🎙️ Speaking
+          </div>
+        )}
+        
+        <Canvas
+          camera={{ position: [0, 1.5, 3], fov: 45 }}
+          style={{ width: "100%", height: "100%" }}
+          gl={{ antialias: true, alpha: true }}
+        >
+          <ambientLight intensity={0.7} />
+          <directionalLight position={[5, 5, 5]} intensity={1.2} />
+          <pointLight position={[-5, 5, -5]} intensity={0.6} color="#a78bfa" />
+          
+          <Suspense fallback={<Loader />}>
+            <AvatarModel avatarUrl={avatarUrl} isTalking={isTalking} />
+          </Suspense>
+        </Canvas>
+      </div>
+    </ErrorBoundary>
   );
 }
-
-// Preload default avatar
-useGLTF.preload("/models/business-avatar.glb");
