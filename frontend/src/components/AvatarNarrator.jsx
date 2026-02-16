@@ -1,15 +1,73 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, Suspense } from 'react';
 import { Canvas, useFrame, useLoader } from '@react-three/fiber';
 import { useAnimations } from '@react-three/drei';
+import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader';
 
-// Avatar Model Component with Mixamo FBX
+// Loading fallback
+function LoadingSpinner() {
+  return (
+    <div style={{
+      width: '100%',
+      height: '100%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: 'white',
+      fontSize: '12px'
+    }}>
+      Loading avatar...
+    </div>
+  );
+}
+
+// Error fallback
+function ErrorFallback() {
+  return (
+    <div style={{
+      width: '100%',
+      height: '100%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: '#ff6b6b',
+      fontSize: '12px',
+      padding: '10px',
+      textAlign: 'center'
+    }}>
+      Avatar unavailable
+    </div>
+  );
+}
+
+// Avatar Model Component
 function AvatarModel({ avatarUrl, isTalking }) {
   const group = useRef();
-  const fbx = useLoader(FBXLoader, avatarUrl);
-  const { actions } = useAnimations(fbx.animations, group);
+  const [error, setError] = useState(false);
   
-  // Play talking animation when audio is active
+  let fbx = null;
+  
+  try {
+    fbx = useLoader(FBXLoader, avatarUrl, (loader) => {
+      // FBXLoader configuration
+      loader.setPath('/models/');
+    }, (error) => {
+      console.error('FBX loading error:', error);
+      setError(true);
+    });
+  } catch (err) {
+    console.error('Avatar load failed:', err);
+    setError(true);
+    return null;
+  }
+  
+  if (error || !fbx) {
+    return null;
+  }
+  
+  const { actions } = useAnimations(fbx.animations || [], group);
+  
+  // Play animation when talking
   useEffect(() => {
     if (actions && Object.keys(actions).length > 0) {
       const firstAnimation = Object.values(actions)[0];
@@ -21,7 +79,7 @@ function AvatarModel({ avatarUrl, isTalking }) {
     }
   }, [isTalking, actions]);
   
-  // Subtle idle animation when not talking
+  // Idle animation
   useFrame((state) => {
     if (group.current && !isTalking) {
       const time = state.clock.getElapsedTime();
@@ -50,8 +108,9 @@ export default function AvatarNarrator({
 }) {
   const [isTalking, setIsTalking] = useState(false);
   const [visible, setVisible] = useState(true);
+  const [hasError, setHasError] = useState(false);
   
-  // Detect audio playing via volume detection
+  // Audio detection
   useEffect(() => {
     if (!audioElement) return;
     
@@ -64,7 +123,6 @@ export default function AvatarNarrator({
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
       analyser = audioContext.createAnalyser();
       
-      // Check if source already exists
       if (!audioElement.connectedSource) {
         source = audioContext.createMediaElementSource(audioElement);
         audioElement.connectedSource = source;
@@ -178,15 +236,22 @@ export default function AvatarNarrator({
       <Canvas
         camera={{ position: [0, 1.5, 3], fov: 45 }}
         style={{ width: "100%", height: "100%" }}
+        onCreated={({ gl }) => {
+          gl.setClearColor('#00000000', 0);
+        }}
       >
         <ambientLight intensity={0.7} />
         <directionalLight position={[5, 5, 5]} intensity={1.2} />
         <pointLight position={[-5, 5, -5]} intensity={0.6} color="#a78bfa" />
         <spotLight position={[0, 5, 0]} intensity={0.5} angle={0.6} penumbra={1} color="#818cf8" />
         
-        <React.Suspense fallback={null}>
-          <AvatarModel avatarUrl={avatarUrl} isTalking={isTalking} />
-        </React.Suspense>
+        <Suspense fallback={<LoadingSpinner />}>
+          {!hasError ? (
+            <AvatarModel avatarUrl={avatarUrl} isTalking={isTalking} />
+          ) : (
+            <ErrorFallback />
+          )}
+        </Suspense>
       </Canvas>
       
       <style>{`
