@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Trash2, Download, Play, Settings, Image, FileText, X, Upload, GripVertical, Copy, RefreshCw, Save, FolderOpen, Music, Volume2, Check } from 'lucide-react';
+import AnimatedAvatar from './AnimatedAvatar';
 
 export default function VideoCreator() {
   // ========== API URL DETECTION ==========
@@ -71,6 +72,12 @@ export default function VideoCreator() {
   const [selectedMusic, setSelectedMusic] = useState(null);
   const [stockMediaType, setStockMediaType] = useState('image');
   const [musicVolume, setMusicVolume] = useState(10);
+  
+  // Avatar settings
+  const [useAvatar, setUseAvatar] = useState(false);
+  const [avatarPosition, setAvatarPosition] = useState('bottom-right');
+  const [avatarSize, setAvatarSize] = useState('medium');
+  const [avatarStyle, setAvatarStyle] = useState('business');
 
   const totalDur = scenes.reduce((sum, s) => sum + (parseFloat(s.duration) || 0), 0);
   const totalWords = scenes.reduce((sum, s) => sum + (s.text?.split(' ').length || 0), 0);
@@ -545,7 +552,7 @@ export default function VideoCreator() {
     const d = {
       version: '1.0',
       project_name: project,
-      settings: { subtitles, subtitleStyle, fontSize, useElevenLabs, autoAI, musicVolume },
+      settings: { subtitles, subtitleStyle, fontSize, useElevenLabs, autoAI, musicVolume, useAvatar, avatarPosition, avatarSize, avatarStyle },
       script: text,
       scenes,
       music: selectedMusic
@@ -576,6 +583,10 @@ export default function VideoCreator() {
         setUseElevenLabs(d.settings?.useElevenLabs || false);
         setAutoAI(d.settings?.autoAI ?? true);
         setMusicVolume(d.settings?.musicVolume || 10);
+        setUseAvatar(d.settings?.useAvatar || false);
+        setAvatarPosition(d.settings?.avatarPosition || 'bottom-right');
+        setAvatarSize(d.settings?.avatarSize || 'medium');
+        setAvatarStyle(d.settings?.avatarStyle || 'business');
         setText(d.script || '');
         setScenes(d.scenes || []);
         setSelectedMusic(d.music || null);
@@ -1021,6 +1032,55 @@ export default function VideoCreator() {
                 </div>
                 
                 <div className="flex items-center justify-between">
+                  <span className="text-sm">🎬 Avatar Narrator</span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useAvatar}
+                      onChange={(e) => setUseAvatar(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-slate-600 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-500"></div>
+                  </label>
+                </div>
+
+                {useAvatar && (
+                  <div className="space-y-3 pl-4 border-l-2 border-purple-500/30">
+                    <select
+                      value={avatarStyle}
+                      onChange={(e) => setAvatarStyle(e.target.value)}
+                      className="w-full bg-slate-700/50 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:border-purple-500 focus:outline-none transition-colors"
+                    >
+                      <option value="business">💼 Business</option>
+                      <option value="casual">👕 Casual</option>
+                      <option value="robot">🤖 AI Assistant</option>
+                    </select>
+                    <select
+                      value={avatarPosition}
+                      onChange={(e) => setAvatarPosition(e.target.value)}
+                      className="w-full bg-slate-700/50 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:border-purple-500 focus:outline-none transition-colors"
+                    >
+                      <option value="bottom-right">Bottom Right</option>
+                      <option value="bottom-left">Bottom Left</option>
+                      <option value="top-right">Top Right</option>
+                      <option value="top-left">Top Left</option>
+                    </select>
+                    <select
+                      value={avatarSize}
+                      onChange={(e) => setAvatarSize(e.target.value)}
+                      className="w-full bg-slate-700/50 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:border-purple-500 focus:outline-none transition-colors"
+                    >
+                      <option value="small">Small</option>
+                      <option value="medium">Medium</option>
+                      <option value="large">Large</option>
+                    </select>
+                    <div className="text-xs text-green-400 bg-green-500/10 p-2 rounded border border-green-500/30">
+                      ✓ Lottie Avatar enabled
+                    </div>
+                  </div>
+                )}
+                
+                <div className="flex items-center justify-between">
                   <span className="text-sm">Subtitles</span>
                   <label className="relative inline-flex items-center cursor-pointer">
                     <input
@@ -1247,6 +1307,15 @@ export default function VideoCreator() {
             )}
           </div>
         </div>
+      )}
+
+      {/* Lottie Avatar Narrator */}
+      {useAvatar && (
+        <AnimatedAvatar
+          position={avatarPosition}
+          size={avatarSize}
+          avatarStyle={avatarStyle}
+        />
       )}
     </div>
   );
