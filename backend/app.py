@@ -552,9 +552,10 @@ def serve_video(filename):
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+# ========== MODIFIED RENDER ENDPOINT WITH AVATAR SUPPORT ==========
 @app.route("/api/render", methods=["POST", "OPTIONS"])
 def api_render():
-    """Render video"""
+    """Render video with avatar support"""
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"}), 200
         
@@ -568,8 +569,16 @@ def api_render():
     use_elevenlabs = bool(data.get("use_elevenlabs", False))
     background_music = data.get("background_music", None)
     music_volume = float(data.get("music_volume", 0.1))
+    
+    # ========== AVATAR PARAMETERS ==========
+    use_avatar = bool(data.get("use_avatar", False))
+    avatar_position = data.get("avatar_position", "bottom-right")
+    avatar_size = data.get("avatar_size", "medium")
+    avatar_style = data.get("avatar_style", "business")
 
     print(f"[INFO] Render request: project='{project}', scenes={len(scenes)}")
+    if use_avatar:
+        print(f"[INFO] 🎭 Avatar enabled: {avatar_style} ({avatar_size}) at {avatar_position}")
 
     try:
         path = render_video(
@@ -583,7 +592,11 @@ def api_render():
             font_size=font_size,
             use_elevenlabs=use_elevenlabs,
             background_music=background_music,
-            music_volume=music_volume
+            music_volume=music_volume,
+            use_avatar=use_avatar,           # AVATAR
+            avatar_position=avatar_position, # AVATAR
+            avatar_size=avatar_size,         # AVATAR
+            avatar_style=avatar_style        # AVATAR
         )
         print(f"[OK] Video rendered: {path}")
         
@@ -647,7 +660,8 @@ def root():
         "ok": True, 
         "service": "ai-text-to-video-backend",
         "cloudflare": client.get("available", False),
-        "cors": "enabled"
+        "cors": "enabled",
+        "avatar": "enabled"
     })
 
 # ========== PEXELS ENDPOINTS ==========
@@ -792,11 +806,12 @@ def download_video():
 
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("🎬 AI Text-to-Video API Server")
+    print("🎬 AI Text-to-Video API Server + AVATAR")
     print("="*60)
     print(f"🌐 CORS: ENABLED (All origins)")
     print(f"🖼️  Cloudflare: {'✅' if client.get('available', False) else '❌'}")
     print(f"📸 Pexels: {'✅' if os.getenv('PEXELS_API_KEY') else '❌'}")
+    print(f"🎭 Avatar: ENABLED")
     print("="*60 + "\n")
     
     app.run(host="0.0.0.0", port=5001, debug=True)
