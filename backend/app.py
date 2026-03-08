@@ -13,15 +13,15 @@ from utils import (
     MUSIC_CACHE,
     generate_script_openai,
     get_available_voices,
-    PEXELS_API_KEY
+    PEXELS_API_KEY,
+    get_scene_durations,
 )
 import requests
 from PIL import Image
 from io import BytesIO
 
-# ========== PEXELS IMPORTS ==========
 from pexels_api import (
-    search_pexels_images, 
+    search_pexels_images,
     search_pexels_videos,
     search_and_download_image,
     search_and_download_video
@@ -29,19 +29,8 @@ from pexels_api import (
 
 app = Flask(__name__)
 
-# ========== FIXED CORS CONFIGURATION ==========
-CORS(app, resources={
-    r"/*": {
-        "origins": "*",  # Allow all origins for development
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization", "Accept"],
-        "expose_headers": ["Content-Type", "Content-Length"],
-        "supports_credentials": False,
-        "max_age": 3600
-    }
-})
+CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET","POST","PUT","DELETE","OPTIONS"], "allow_headers": ["Content-Type","Authorization","Accept"], "expose_headers": ["Content-Type","Content-Length"], "supports_credentials": False, "max_age": 3600}})
 
-# Add CORS headers to all responses
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -52,766 +41,552 @@ def after_request(response):
 for p in (UPLOADS, OUTPUTS, MUSIC_CACHE):
     os.makedirs(p, exist_ok=True)
 
-# ========== HEALTH CHECK ENDPOINT ==========
-@app.route("/api/health", methods=["GET", "OPTIONS"])
+@app.route("/api/health", methods=["GET","OPTIONS"])
 def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        "status": "ok",
-        "message": "Backend is running",
-        "cors": "enabled"
-    })
+    return jsonify({"status": "ok", "message": "Backend is running", "cors": "enabled"})
 
-# ========== API Routes ==========
-@app.route("/api/generate_script", methods=["POST", "OPTIONS"])
+@app.route("/api/generate_script", methods=["POST","OPTIONS"])
 def api_generate_script():
-    """Generate script using Groq AI"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
     data = request.get_json(force=True)
     topic = (data.get("topic") or "").strip()
     style = data.get("style", "educational")
     duration = data.get("duration", 60)
-    
-    if not topic:
-        return jsonify({"error": "topic required"}), 400
-    
+    if not topic: return jsonify({"error": "topic required"}), 400
     try:
         script = generate_script_openai(topic, style=style, duration=duration)
-        return jsonify({
-            "success": True,
-            "script": script,
-            "topic": topic,
-            "style": style,
-            "duration": duration
-        })
+        return jsonify({"success": True, "script": script, "topic": topic, "style": style, "duration": duration})
     except Exception as e:
         print(f"[ERROR] Script generation failed: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/voices", methods=["GET", "OPTIONS"])
+@app.route("/api/voices", methods=["GET","OPTIONS"])
 def api_get_voices():
-    """Get available ElevenLabs voices"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
     try:
-        print("[INFO] Fetching ElevenLabs voices...")
         voices = get_available_voices()
-        print(f"[SUCCESS] Returning {len(voices)} voices")
         return jsonify({"voices": voices, "success": True})
     except Exception as e:
-        print(f"[ERROR] Voice fetch failed: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         return jsonify({"error": str(e), "voices": [], "success": False}), 500
 
-@app.route("/api/split", methods=["POST", "OPTIONS"])
+@app.route("/api/split", methods=["POST","OPTIONS"])
 def api_split():
-    """Split text into scenes by period (.)"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
     data = request.get_json(force=True)
     text = (data.get("text") or "").strip()
-    
-    if not text:
-        return jsonify({"error": "text required"}), 400
-
+    if not text: return jsonify({"error": "text required"}), 400
     chunks = split_text_into_scenes(text)
-    scenes = [
-        {"id": f"scene_{i+1}", "text": chunk, "background_path": "", "duration": 5, "voice_id": "", "image_prompt": ""}
-        for i, chunk in enumerate(chunks)
-    ]
+    scenes = [{"id": f"scene_{i+1}", "text": chunk, "background_path": "", "duration": 5, "voice_id": "", "image_prompt": ""} for i, chunk in enumerate(chunks)]
     return jsonify({"scenes": scenes})
 
-@app.route("/api/upload_background", methods=["POST", "OPTIONS"])
+@app.route("/api/upload_background", methods=["POST","OPTIONS"])
 def api_upload_background():
-    """Upload background image/video - Save as PNG for images"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
-    if "file" not in request.files:
-        return jsonify({"error": "file is required"}), 400
-
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
+    if "file" not in request.files: return jsonify({"error": "file is required"}), 400
     scene_id = request.form.get("scene_id", "scene")
     f = request.files["file"]
     ext = os.path.splitext(f.filename)[1].lower() or ".dat"
-    
-    # For images, convert to PNG for better quality
-    if ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']:
+    if ext in ['.jpg','.jpeg','.png','.bmp','.gif','.webp']:
         try:
             img = Image.open(f)
-            
-            if img.mode in ('RGBA', 'LA', 'P'):
-                background = Image.new('RGB', img.size, (255, 255, 255))
-                if img.mode == 'P':
-                    img = img.convert('RGBA')
-                if img.mode in ('RGBA', 'LA'):
-                    background.paste(img, mask=img.split()[-1])
-                    img = background
-            
+            if img.mode in ('RGBA','LA','P'):
+                bg = Image.new('RGB', img.size, (255,255,255))
+                if img.mode == 'P': img = img.convert('RGBA')
+                if img.mode in ('RGBA','LA'): bg.paste(img, mask=img.split()[-1]); img = bg
             filename = f"{scene_id}_uploaded.png"
             out = os.path.join(UPLOADS, filename)
             img.save(out, 'PNG', optimize=False, compress_level=3)
-            print(f"[OK] Uploaded image saved as PNG: {out}")
-            
-            # Return relative path that frontend can use
-            return jsonify({
-                "scene_id": scene_id, 
-                "background_path": out,
-                "filename": filename,
-                "url": f"/api/uploads/{filename}"
-            })
-            
+            return jsonify({"scene_id": scene_id, "background_path": out, "filename": filename, "url": f"/api/uploads/{filename}"})
         except Exception as e:
-            print(f"[ERROR] Image conversion failed: {e}")
             return jsonify({"error": str(e)}), 500
     else:
         filename = f"{scene_id}{ext}"
         out = os.path.join(UPLOADS, filename)
         os.makedirs(os.path.dirname(out), exist_ok=True)
         f.save(out)
-        
-        return jsonify({
-            "scene_id": scene_id, 
-            "background_path": out,
-            "filename": filename,
-            "url": f"/api/uploads/{filename}"
-        })
+        return jsonify({"scene_id": scene_id, "background_path": out, "filename": filename, "url": f"/api/uploads/{filename}"})
 
-# ========== SERVE UPLOADED FILES ==========
-@app.route("/api/uploads/<filename>", methods=["GET", "OPTIONS"])
+@app.route("/api/uploads/<filename>", methods=["GET","OPTIONS"])
 def serve_upload(filename):
-    """Serve uploaded files"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
     try:
         return send_from_directory(UPLOADS, filename)
-    except Exception as e:
-        print(f"[ERROR] File not found: {filename}")
+    except:
         return jsonify({"error": "File not found"}), 404
 
-@app.route("/api/test_cloudflare", methods=["GET", "OPTIONS"])
+@app.route("/api/test_cloudflare", methods=["GET","OPTIONS"])
 def api_test_cloudflare():
-    """Test endpoint to verify Cloudflare Workers AI integration"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
     try:
         if not client.get("available", False):
-            return jsonify({
-                "status": "error", 
-                "message": "Cloudflare Workers AI endpoint not available."
-            }), 500
-        
+            return jsonify({"status":"error","message":"Cloudflare Workers AI not available."}), 500
         success = test_ai_generation()
-        
-        if success:
-            return jsonify({
-                "status": "success",
-                "message": "Cloudflare Workers AI is working!",
-                "client_available": True
-            })
-        else:
-            return jsonify({
-                "status": "error",
-                "message": "API test failed",
-                "client_available": True
-            }), 500
-            
+        if success: return jsonify({"status":"success","message":"Cloudflare Workers AI is working!","client_available":True})
+        return jsonify({"status":"error","message":"API test failed","client_available":True}), 500
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": f"Test failed: {str(e)}",
-            "client_available": client.get("available", False)
-        }), 500
+        return jsonify({"status":"error","message":f"Test failed: {str(e)}","client_available":client.get("available",False)}), 500
 
-@app.route("/api/generate_single_image", methods=["POST", "OPTIONS"])
+@app.route("/api/generate_single_image", methods=["POST","OPTIONS"])
 def api_generate_single_image():
-    """Generate a single AI image for testing"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
     data = request.get_json(force=True)
     prompt = (data.get("prompt") or "").strip()
-    
-    if not prompt:
-        return jsonify({"error": "prompt required"}), 400
-    
+    if not prompt: return jsonify({"error": "prompt required"}), 400
     try:
         scene_id = f"test_{uuid.uuid4().hex[:8]}"
         filename = f"{scene_id}.png"
         path = os.path.join(UPLOADS, filename)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        
         result_path = ai_generate_image(prompt, path)
-        
-        return jsonify({
-            "success": True,
-            "prompt": prompt,
-            "image_path": result_path,
-            "filename": filename,
-            "download_url": f"/api/uploads/{filename}"
-        })
-        
+        return jsonify({"success":True,"prompt":prompt,"image_path":result_path,"filename":filename,"download_url":f"/api/uploads/{filename}"})
     except Exception as e:
-        print(f"[ERROR] Image generation failed: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/download_image", methods=["GET", "OPTIONS"])
+@app.route("/api/download_image", methods=["GET","OPTIONS"])
 def api_download_image():
-    """Download generated images"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
-    path = request.args.get("path", "")
-    if not path:
-        return jsonify({"error": "path required"}), 400
-
-    path = os.path.abspath(path)
-    
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
+    path = os.path.abspath(request.args.get("path",""))
     uploads_abs = os.path.abspath(UPLOADS)
-    gen_img_abs = os.path.abspath(os.path.join(os.path.dirname(__file__), "generated_images"))
-    
+    gen_img_abs = os.path.abspath(os.path.join(os.path.dirname(__file__),"generated_images"))
     if not (path.startswith(uploads_abs) or path.startswith(gen_img_abs)):
-        return jsonify({"error": "invalid path"}), 400
-
+        return jsonify({"error":"invalid path"}), 400
     try:
         return send_file(path, as_attachment=True)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/stock_search", methods=["GET", "OPTIONS"])
+@app.route("/api/stock_search", methods=["GET","OPTIONS"])
 def api_stock_search():
-    """Search Pexels for stock photos/videos"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
-    query = request.args.get("query", "").strip()
-    if not query:
-        return jsonify({"error": "query required"}), 400
-    
-    pexels_api_key = os.getenv('PEXELS_API_KEY')
-    if not pexels_api_key:
-        return jsonify({"results": [], "message": "Pexels API not configured"}), 200
-    
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
+    query = request.args.get("query","").strip()
+    if not query: return jsonify({"error":"query required"}), 400
+    pexels_key = os.getenv('PEXELS_API_KEY')
+    if not pexels_key: return jsonify({"results":[],"message":"Pexels API not configured"}), 200
     try:
-        print(f"[INFO] Searching Pexels for: {query}")
-        headers = {"Authorization": pexels_api_key}
-        response = requests.get(
-            f"https://api.pexels.com/v1/search?query={query}&per_page=15",
-            headers=headers,
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            results = []
-            for photo in data.get('photos', []):
-                results.append({
-                    "type": "image",
-                    "url": photo['src']['large2x'],
-                    "thumbnail": photo['src']['medium'],
-                    "alt": photo.get('alt', ''),
-                    "photographer": photo.get('photographer', '')
-                })
-            print(f"[SUCCESS] Found {len(results)} results")
-            return jsonify({"results": results, "success": True})
-        else:
-            print(f"[ERROR] Pexels returned status {response.status_code}")
-            return jsonify({"results": [], "error": "Pexels API error"}), 500
-            
+        r = requests.get(f"https://api.pexels.com/v1/search?query={query}&per_page=15", headers={"Authorization":pexels_key}, timeout=10)
+        if r.status_code == 200:
+            results = [{"type":"image","url":p['src']['large2x'],"thumbnail":p['src']['medium'],"alt":p.get('alt',''),"photographer":p.get('photographer','')} for p in r.json().get('photos',[])]
+            return jsonify({"results":results,"success":True})
+        return jsonify({"results":[],"error":"Pexels API error"}), 500
     except Exception as e:
-        print(f"[ERROR] Stock search failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"results": [], "error": str(e)}), 500
+        return jsonify({"results":[],"error":str(e)}), 500
 
-@app.route("/api/download_stock", methods=["POST", "OPTIONS"])
+@app.route("/api/download_stock", methods=["POST","OPTIONS"])
 def api_download_stock():
-    """Download stock media and save as HIGH QUALITY PNG"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
     data = request.get_json(force=True)
-    url = data.get("url", "")
-    scene_id = data.get("scene_id", "scene")
-    media_type = data.get("type", "image")
-    
-    if not url:
-        return jsonify({"error": "url required"}), 400
-    
+    url = data.get("url",""); scene_id = data.get("scene_id","scene"); media_type = data.get("type","image")
+    if not url: return jsonify({"error":"url required"}), 400
     try:
-        print(f"[INFO] Downloading stock {media_type} from: {url}")
-        response = requests.get(url, timeout=30)
-        
-        if response.status_code == 200:
+        r = requests.get(url, timeout=30)
+        if r.status_code == 200:
             if media_type == "image":
-                try:
-                    img = Image.open(BytesIO(response.content))
-                    
-                    if img.mode in ('RGBA', 'LA', 'P'):
-                        background = Image.new('RGB', img.size, (255, 255, 255))
-                        if img.mode == 'P':
-                            img = img.convert('RGBA')
-                        if img.mode in ('RGBA', 'LA'):
-                            background.paste(img, mask=img.split()[-1])
-                            img = background
-                    
-                    filename = f"{scene_id}_stock.png"
-                    filepath = os.path.join(UPLOADS, filename)
-                    
-                    img.save(filepath, 'PNG', optimize=False, compress_level=3)
-                    print(f"[OK] Saved stock image: {filepath}")
-                    
-                    return jsonify({
-                        "path": filepath,
-                        "filename": filename,
-                        "url": f"/api/uploads/{filename}",
-                        "success": True
-                    })
-                    
-                except Exception as img_error:
-                    print(f"[ERROR] Image processing failed: {img_error}")
-                    import traceback
-                    traceback.print_exc()
-                    return jsonify({"error": f"Image processing failed: {str(img_error)}"}), 500
-            else:
-                ext = ".mp4"
-                filename = f"{scene_id}_stock{ext}"
+                img = Image.open(BytesIO(r.content))
+                if img.mode in ('RGBA','LA','P'):
+                    bg = Image.new('RGB', img.size, (255,255,255))
+                    if img.mode == 'P': img = img.convert('RGBA')
+                    if img.mode in ('RGBA','LA'): bg.paste(img, mask=img.split()[-1]); img = bg
+                filename = f"{scene_id}_stock.png"
                 filepath = os.path.join(UPLOADS, filename)
-                
-                with open(filepath, 'wb') as f:
-                    f.write(response.content)
-                
-                print(f"[OK] Saved stock video: {filepath}")
-                return jsonify({
-                    "path": filepath,
-                    "filename": filename,
-                    "url": f"/api/uploads/{filename}",
-                    "success": True
-                })
-        else:
-            return jsonify({"error": f"Download failed with status {response.status_code}"}), 500
-            
+                img.save(filepath,'PNG',optimize=False,compress_level=3)
+                return jsonify({"path":filepath,"filename":filename,"url":f"/api/uploads/{filename}","success":True})
+            else:
+                filename = f"{scene_id}_stock.mp4"
+                filepath = os.path.join(UPLOADS, filename)
+                with open(filepath,'wb') as f: f.write(r.content)
+                return jsonify({"path":filepath,"filename":filename,"url":f"/api/uploads/{filename}","success":True})
+        return jsonify({"error":f"Download failed: {r.status_code}"}), 500
     except Exception as e:
-        print(f"[ERROR] Stock download failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error":str(e)}), 500
 
-@app.route("/api/music/upload", methods=["POST", "OPTIONS"])
+@app.route("/api/music/upload", methods=["POST","OPTIONS"])
 def api_music_upload():
-    """Upload custom music file"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
-    if "file" not in request.files:
-        return jsonify({"error": "file is required"}), 400
-
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
+    if "file" not in request.files: return jsonify({"error":"file is required"}), 400
     f = request.files["file"]
     ext = os.path.splitext(f.filename)[1].lower()
-    
-    if ext not in ['.mp3', '.wav', '.m4a', '.ogg']:
-        return jsonify({"error": "Invalid audio format. Use MP3, WAV, M4A, or OGG"}), 400
-    
+    if ext not in ['.mp3','.wav','.m4a','.ogg']: return jsonify({"error":"Invalid audio format"}), 400
     filename = f"custom_{uuid.uuid4().hex[:8]}{ext}"
     filepath = os.path.join(MUSIC_CACHE, filename)
     os.makedirs(MUSIC_CACHE, exist_ok=True)
-    
     try:
         f.save(filepath)
-        print(f"[OK] Custom music uploaded: {filepath}")
-        return jsonify({"success": True, "path": filepath, "filename": filename})
+        return jsonify({"success":True,"path":filepath,"filename":filename})
     except Exception as e:
-        print(f"[ERROR] Music upload failed: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error":str(e)}), 500
 
-@app.route("/api/generate_images", methods=["POST", "OPTIONS"])
+@app.route("/api/generate_images", methods=["POST","OPTIONS"])
 def api_generate_images():
-    """Generate AI images for all scenes"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
     data = request.get_json(force=True)
-    scenes = data.get("scenes", []) or []
+    scenes = data.get("scenes",[]) or []
     out = []
-
     for s in scenes:
-        scene_id = s.get("id", "scene")
+        scene_id = s.get("id","scene")
         filename = f"{scene_id}.png"
         path = os.path.join(UPLOADS, filename)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        
-        image_prompt = s.get("image_prompt", "").strip()
-        if not image_prompt:
-            image_prompt = s.get("text", "").strip()
-        
+        image_prompt = s.get("image_prompt","").strip() or s.get("text","").strip()
         try:
-            print(f"[INFO] Generating image for scene {scene_id}")
             result_path = ai_generate_image(image_prompt, path)
-            out.append({
-                "id": scene_id,
-                "background_path": result_path,
-                "filename": filename,
-                "url": f"/api/uploads/{filename}",
-                "success": True,
-                "prompt_used": image_prompt[:50]
-            })
+            out.append({"id":scene_id,"background_path":result_path,"filename":filename,"url":f"/api/uploads/{filename}","success":True,"prompt_used":image_prompt[:50]})
         except Exception as e:
-            print(f"[ERROR] Failed to generate image for scene {scene_id}: {e}")
-            out.append({
-                "id": scene_id,
-                "background_path": "",
-                "success": False,
-                "error": str(e)
-            })
+            out.append({"id":scene_id,"background_path":"","success":False,"error":str(e)})
+    return jsonify({"images":out})
 
-    return jsonify({"images": out})
-
-@app.route("/api/video/<filename>", methods=["GET", "OPTIONS"])
+@app.route("/api/video/<filename>", methods=["GET","OPTIONS"])
 def serve_video(filename):
-    """Serve video files with range request support"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
     try:
-        video_path = os.path.join(OUTPUTS, filename)
-        video_path = os.path.abspath(video_path)
-        outputs_abs = os.path.abspath(OUTPUTS)
-        
-        if not video_path.startswith(outputs_abs):
-            return jsonify({"error": "invalid path"}), 400
-            
-        if not os.path.exists(video_path):
-            return jsonify({"error": "file not found"}), 404
-        
+        video_path = os.path.abspath(os.path.join(OUTPUTS, filename))
+        if not video_path.startswith(os.path.abspath(OUTPUTS)): return jsonify({"error":"invalid path"}), 400
+        if not os.path.exists(video_path): return jsonify({"error":"file not found"}), 404
         file_size = os.path.getsize(video_path)
         range_header = request.headers.get('Range')
-        
         if not range_header:
             is_download = request.args.get('download') == 'true'
-            
             def generate():
-                with open(video_path, 'rb') as f:
-                    data = f.read(8192)
-                    while data:
-                        yield data
-                        data = f.read(8192)
-            
-            headers = {
-                'Content-Type': 'video/mp4',
-                'Content-Length': str(file_size),
-                'Accept-Ranges': 'bytes'
-            }
-            
-            if is_download:
-                headers["Content-Disposition"] = f"attachment; filename={filename}"
-            else:
-                headers["Content-Disposition"] = f"inline; filename={filename}"
-            
+                with open(video_path,'rb') as f:
+                    d = f.read(8192)
+                    while d: yield d; d = f.read(8192)
+            headers = {'Content-Type':'video/mp4','Content-Length':str(file_size),'Accept-Ranges':'bytes','Content-Disposition':f"{'attachment' if is_download else 'inline'}; filename={filename}"}
             return app.response_class(generate(), headers=headers)
-        
-        byte_range = range_header.replace('bytes=', '').split('-')
-        start = int(byte_range[0]) if byte_range[0] else 0
-        end = int(byte_range[1]) if len(byte_range) > 1 and byte_range[1] else file_size - 1
-        
-        if start >= file_size or end >= file_size or start > end:
-            return jsonify({"error": "Invalid range"}), 416
-        
+        parts = range_header.replace('bytes=','').split('-')
+        start = int(parts[0]) if parts[0] else 0
+        end   = int(parts[1]) if len(parts)>1 and parts[1] else file_size-1
+        if start >= file_size or end >= file_size or start > end: return jsonify({"error":"Invalid range"}), 416
         length = end - start + 1
-        
         def generate_range():
-            with open(video_path, 'rb') as f:
-                f.seek(start)
-                remaining = length
-                while remaining > 0:
-                    chunk_size = min(8192, remaining)
-                    data = f.read(chunk_size)
-                    if not data:
-                        break
-                    remaining -= len(data)
-                    yield data
-        
-        headers = {
-            'Content-Type': 'video/mp4',
-            'Content-Range': f'bytes {start}-{end}/{file_size}',
-            'Accept-Ranges': 'bytes',
-            'Content-Length': str(length),
-            'Content-Disposition': f'inline; filename={filename}'
-        }
-        
+            with open(video_path,'rb') as f:
+                f.seek(start); rem = length
+                while rem > 0:
+                    chunk = f.read(min(8192,rem))
+                    if not chunk: break
+                    rem -= len(chunk); yield chunk
+        headers = {'Content-Type':'video/mp4','Content-Range':f'bytes {start}-{end}/{file_size}','Accept-Ranges':'bytes','Content-Length':str(length),'Content-Disposition':f'inline; filename={filename}'}
         return app.response_class(generate_range(), status=206, headers=headers)
-        
     except Exception as e:
-        print(f"[ERROR] Video serving failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        import traceback; traceback.print_exc()
+        return jsonify({"error":str(e)}), 500
 
-# ========== MODIFIED RENDER ENDPOINT WITH AVATAR SUPPORT ==========
-@app.route("/api/render", methods=["POST", "OPTIONS"])
+# ── RENDER ───────────────────────────────────────────────────────────────────
+@app.route("/api/render", methods=["POST","OPTIONS"])
 def api_render():
-    """Render video with avatar support"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
-    data = request.get_json(force=True)
-    project = data.get("project_name", "video_project")
-    scenes = data.get("scenes", []) or []
-    auto_ai = bool(data.get("auto_ai_images", True))
-    subtitles = bool(data.get("subtitles", False))
-    subtitle_style = data.get("subtitle_style", "bottom")
-    font_size = int(data.get("font_size", 48))
-    use_elevenlabs = bool(data.get("use_elevenlabs", False))
-    background_music = data.get("background_music", None)
-    music_volume = float(data.get("music_volume", 0.1))
-    
-    # ========== AVATAR PARAMETERS ==========
-    use_avatar = bool(data.get("use_avatar", False))
-    avatar_position = data.get("avatar_position", "bottom-right")
-    avatar_size = data.get("avatar_size", "medium")
-    avatar_style = data.get("avatar_style", "business")
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
+    data             = request.get_json(force=True)
+    project          = data.get("project_name","video_project")
+    scenes           = data.get("scenes",[]) or []
+    auto_ai          = bool(data.get("auto_ai_images",True))
+    subtitles        = bool(data.get("subtitles", True))
+    subtitle_style   = data.get("subtitle_style","bottom")
+    font_size        = int(data.get("font_size",48))
+    use_elevenlabs   = True
+    background_music = data.get("background_music",None)
+    music_volume     = float(data.get("music_volume",0.1))
+    use_avatar       = bool(data.get("use_avatar",False))
+    avatar_position  = data.get("avatar_position","bottom-right")
+    avatar_size      = data.get("avatar_size","medium")
+    avatar_style     = data.get("avatar_style","male")
 
-    print(f"[INFO] Render request: project='{project}', scenes={len(scenes)}")
-    if use_avatar:
-        print(f"[INFO] 🎭 Avatar enabled: {avatar_style} ({avatar_size}) at {avatar_position}")
-
+    print(f"[INFO] Render: '{project}' | {len(scenes)} scenes | elevenlabs=ALWAYS | avatar={use_avatar}")
     try:
         path = render_video(
-            project_name=project,
-            scenes=scenes,
-            auto_ai=auto_ai,
-            size=(1280, 720),
-            fps=25,
-            subtitles=subtitles,
-            subtitle_style=subtitle_style,
-            font_size=font_size,
+            project_name=project, scenes=scenes, auto_ai=auto_ai,
+            size=(1280,720), fps=25, subtitles=subtitles,
+            subtitle_style=subtitle_style, font_size=font_size,
             use_elevenlabs=use_elevenlabs,
-            background_music=background_music,
-            music_volume=music_volume,
-            use_avatar=use_avatar,           # AVATAR
-            avatar_position=avatar_position, # AVATAR
-            avatar_size=avatar_size,         # AVATAR
-            avatar_style=avatar_style        # AVATAR
+            background_music=background_music, music_volume=music_volume,
+            use_avatar=use_avatar, avatar_position=avatar_position,
+            avatar_size=avatar_size, avatar_style=avatar_style
         )
-        print(f"[OK] Video rendered: {path}")
-        
         filename = os.path.basename(path)
-        return jsonify({
-            "video_path": path,
-            "filename": filename,
-            "download_url": f"/api/video/{filename}"
-        })
+        return jsonify({"video_path":path,"filename":filename,"download_url":f"/api/video/{filename}"})
     except Exception as e:
-        print(f"[ERROR] Rendering failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        import traceback; traceback.print_exc()
+        return jsonify({"error":str(e)}), 500
 
-@app.route("/api/download", methods=["GET", "OPTIONS"])
+@app.route("/api/download", methods=["GET","OPTIONS"])
 def api_download():
-    """Download rendered video"""
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-        
-    path = request.args.get("path", "")
-    if not path:
-        return jsonify({"error": "path required"}), 400
-
-    path = os.path.normpath(path)
-    path = os.path.abspath(path)
-    outputs_abs = os.path.abspath(OUTPUTS)
-    
-    if not path.startswith(outputs_abs):
-        return jsonify({"error": "invalid path"}), 400
-
-    if not os.path.exists(path):
-        return jsonify({"error": "file not found"}), 404
-
+    if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
+    path = os.path.abspath(request.args.get("path",""))
+    if not path or not path.startswith(os.path.abspath(OUTPUTS)): return jsonify({"error":"invalid path"}), 400
+    if not os.path.exists(path): return jsonify({"error":"file not found"}), 404
     try:
         filename = os.path.basename(path)
-        
         def generate():
-            with open(path, 'rb') as f:
+            with open(path,'rb') as f:
                 while True:
-                    data = f.read(4096)
-                    if not data:
-                        break
-                    yield data
-        
-        return app.response_class(
-            generate(),
-            mimetype="video/mp4",
-            headers={
-                "Content-Disposition": f"attachment; filename={filename}",
-                "Content-Type": "video/mp4"
-            }
-        )
+                    d = f.read(4096)
+                    if not d: break
+                    yield d
+        return app.response_class(generate(), mimetype="video/mp4", headers={"Content-Disposition":f"attachment; filename={filename}","Content-Type":"video/mp4"})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error":str(e)}), 500
 
 @app.get("/")
 def root():
-    return jsonify({
-        "ok": True, 
-        "service": "ai-text-to-video-backend",
-        "cloudflare": client.get("available", False),
-        "cors": "enabled",
-        "avatar": "enabled"
-    })
+    return jsonify({"ok":True,"service":"ai-text-to-video-backend","cloudflare":client.get("available",False),"cors":"enabled","avatar":"enabled"})
 
-# ========== PEXELS ENDPOINTS ==========
-
-@app.route("/api/generate_images_v2", methods=["POST", "OPTIONS"])
+# ── STATIC images ────────────────────────────────────────────────────────────
+@app.route("/api/generate_images_v2", methods=["POST","OPTIONS"])
 def generate_images_v2():
-    """Smart image generation with Cloudflare → Pexels fallback"""
-    if request.method == "OPTIONS":
-        return "", 200
-    
+    if request.method == "OPTIONS": return "", 200
     try:
-        data = request.json
-        scenes = data.get("scenes", [])
-        
+        scenes = request.json.get("scenes",[])
         results = []
-        
         for scene in scenes:
             scene_id = scene["id"]
-            text = scene.get("text", "")
-            prompt = scene.get("image_prompt") or text
-            
-            print(f"[INFO] Generating image for {scene_id}: {prompt}")
-            
-            cloudflare_success = False
+            prompt   = scene.get("image_prompt") or scene.get("text","")
+            print(f"[INFO] Static image: {scene_id}")
+            ok = False
             try:
-                # FIX: Create proper file path for Cloudflare
-                filename = f"{scene_id}.png"
+                filename    = f"{scene_id}.png"
                 result_path = os.path.join(UPLOADS, filename)
                 os.makedirs(UPLOADS, exist_ok=True)
-                
-                # Call Cloudflare with proper path
                 result_path = ai_generate_image(prompt, result_path)
-                
                 if result_path and os.path.exists(result_path):
-                    cloudflare_success = True
-                    filename = os.path.basename(result_path)
-                    source = "cloudflare"
-                    print(f"[OK] Cloudflare generated: {result_path}")
-                    
+                    ok = True; filename = os.path.basename(result_path); source = "cloudflare"
             except Exception as e:
                 print(f"[WARN] Cloudflare failed: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            if not cloudflare_success:
-                print(f"[INFO] Falling back to Pexels for {scene_id}...")
-                pexels_result = search_and_download_image(prompt, scene_id, UPLOADS)
-                
-                if pexels_result["success"]:
-                    result_path = pexels_result["path"]
-                    filename = pexels_result["filename"]
-                    source = "pexels"
-                    print(f"[OK] Pexels downloaded: {result_path}")
+            if not ok:
+                pr = search_and_download_image(prompt, scene_id, UPLOADS)
+                if pr["success"]:
+                    result_path = pr["path"]; filename = pr["filename"]; source = "pexels"
                 else:
-                    results.append({
-                        "id": scene_id,
-                        "success": False,
-                        "error": "Both Cloudflare and Pexels failed"
-                    })
-                    continue
-            
-            results.append({
-                "id": scene_id,
-                "success": True,
-                "background_path": result_path,
-                "url": f"/api/uploads/{filename}",
-                "filename": filename,
-                "source": source
-            })
-        
-        return jsonify({"images": results})
-        
+                    results.append({"id":scene_id,"success":False,"error":"Both Cloudflare and Pexels failed"}); continue
+            results.append({"id":scene_id,"success":True,"background_path":result_path,"url":f"/api/uploads/{filename}","filename":filename,"source":source})
+        return jsonify({"images":results})
     except Exception as e:
-        print(f"[ERROR] Image generation v2 failed: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
+        return jsonify({"error":str(e)}), 500
+
+# ── DYNAMIC videos ───────────────────────────────────────────────────────────
+@app.route("/api/generate_images_v2_dynamic", methods=["POST","OPTIONS"])
+def generate_images_v2_dynamic():
+    """
+    Fetch Pexels videos per scene.
+    - Max 30MB per file
+    - per_page=20 for more candidates
+    - Duration-aware: first pass only picks clips >= TTS duration (no loop needed)
+    - Second pass fallback: any duration (utils.py loops seamlessly)
+    - Tracks used video IDs to avoid duplicates across scenes
+    - Prefers 1080p, rejects 4K
+    - Falls back to static image if nothing found
+    """
+    if request.method == "OPTIONS": return "", 200
+    MAX_MB = 30
+
+    try:
+        scenes     = request.json.get("scenes", [])
+        pexels_key = os.getenv("PEXELS_API_KEY", "")
+        results    = []
+        used_video_ids = set()
+
+        # FIX: pass voice_id from scenes so get_scene_durations uses the right
+        # TTS engine (ElevenLabs if configured, gTTS as fallback).
+        # Pick the first non-gtts voice_id found across scenes.
+        _sample_voice = next(
+            (s.get("voice_id", "").strip() for s in scenes
+             if s.get("voice_id", "").strip()
+             and s.get("voice_id", "").lower() != "gtts"),
+            None
+        )
+
+        # Pre-compute TTS durations — parallelised, ElevenLabs-aware
+        print("[INFO] Pre-computing scene durations from TTS...")
+        try:
+            duration_map = {sid: dur for sid, dur
+                            in get_scene_durations(scenes, voice_id=_sample_voice)}
+        except Exception as _de:
+            print(f"[WARN] get_scene_durations failed ({_de}), using 5s defaults")
+            duration_map = {s["id"]: 5.0 for s in scenes}
+
+        for scene in scenes:
+            scene_id     = scene["id"]
+            prompt       = scene.get("image_prompt") or scene.get("text", "")
+            min_duration = duration_map.get(scene_id, 5.0)
+            print(f"[INFO] Dynamic video search: {scene_id} — {prompt[:60]}")
+            print(f"       Min duration needed: {min_duration:.1f}s")
+
+            video_url       = None
+            selected_vid_id = None
+
+            try:
+                r = requests.get(
+                    "https://api.pexels.com/videos/search",
+                    params={"query": prompt, "per_page": 20, "orientation": "landscape"},
+                    headers={"Authorization": pexels_key},
+                    timeout=15
+                )
+                if r.status_code == 200:
+                    videos = r.json().get("videos", [])
+
+                    def score_file(f):
+                        w    = f.get("width", 0)
+                        size = f.get("size", 0) / (1024 * 1024)
+                        if size > MAX_MB: return -1
+                        if w > 2560:     return -1  # reject 4K
+                        return -abs(w - 1920)        # closest to 1080p wins
+
+                    def best_file_for_vid(vid):
+                        files = [f for f in vid.get("video_files", [])
+                                 if "video" in f.get("file_type", "")]
+                        if not files:
+                            return None
+                        bf = max(files, key=score_file)
+                        if score_file(bf) < 0:
+                            # try smallest as fallback
+                            bf = min(files, key=lambda f: f.get("size", 999999999))
+                            if bf.get("size", 0) / 1024 / 1024 > MAX_MB:
+                                return None
+                        return bf
+
+                    # First pass: only clips >= min_duration (no looping needed)
+                    candidates = []
+                    for vid in videos:
+                        vid_id  = vid.get("id")
+                        vid_dur = float(vid.get("duration", 0))
+                        if vid_id in used_video_ids:
+                            continue
+                        if vid_dur < min_duration:
+                            continue  # too short — skip on first pass
+                        bf = best_file_for_vid(vid)
+                        if bf:
+                            candidates.append((vid_id, bf, bf.get("size", 0) / 1024 / 1024, vid_dur))
+
+                    if not candidates:
+                        # Second pass: accept any duration (utils.py loops seamlessly)
+                        print(f"    [WARN] No clip >= {min_duration:.1f}s — fallback to any duration (will loop)")
+                        for vid in videos:
+                            vid_id  = vid.get("id")
+                            vid_dur = float(vid.get("duration", 0))
+                            if vid_id in used_video_ids:
+                                continue
+                            bf = best_file_for_vid(vid)
+                            if bf:
+                                candidates.append((vid_id, bf, bf.get("size", 0) / 1024 / 1024, vid_dur))
+
+                    if candidates:
+                        candidates.sort(key=lambda x: abs(x[1].get("width", 0) - 1920))
+                        selected_vid_id, selected_file, size_mb, vid_dur = candidates[0]
+                        video_url = selected_file.get("link")
+                        w = selected_file.get("width", "?")
+                        h = selected_file.get("height", "?")
+                        suffix = "✓ long enough" if vid_dur >= min_duration else "— will loop"
+                        print(f"    [Pexels] selected: {w}×{h} ({size_mb:.1f}MB, {vid_dur:.1f}s) {suffix}")
+                    else:
+                        print(f"[WARN] No suitable video found for scene {scene_id}")
+                else:
+                    print(f"[WARN] Pexels API: HTTP {r.status_code}")
+
+            except Exception as e:
+                print(f"[WARN] Pexels search error: {e}")
+
+            # Fall back to static image if no video
+            if not video_url:
+                print(f"[WARN] Falling back to Pexels image for {scene_id}")
+                pr = search_and_download_image(prompt, scene_id, UPLOADS)
+                if pr["success"]:
+                    results.append({
+                        "id": scene_id, "success": True,
+                        "background_path": pr["path"],
+                        "url": f"/api/uploads/{pr['filename']}",
+                        "filename": pr["filename"],
+                        "source": "pexels_image_fallback"
+                    })
+                else:
+                    results.append({"id": scene_id, "success": False, "error": "No video or image found"})
+                continue
+
+            # Download with hard size guard
+            filename  = f"{scene_id}_dynamic.mp4"
+            save_path = os.path.join(UPLOADS, filename)
+            print(f"[INFO] Downloading Pexels video -> {filename}")
+            try:
+                dl = requests.get(video_url, timeout=120, stream=True)
+                if dl.status_code == 200:
+                    downloaded = 0
+                    limit = MAX_MB * 1024 * 1024
+                    with open(save_path, "wb") as fout:
+                        for chunk in dl.iter_content(chunk_size=65536):
+                            if chunk:
+                                downloaded += len(chunk)
+                                if downloaded > limit:
+                                    print(f"[WARN] File exceeded {MAX_MB}MB during download, skipping")
+                                    fout.close()
+                                    os.remove(save_path)
+                                    downloaded = -1
+                                    break
+                                fout.write(chunk)
+
+                    if downloaded > 0 and os.path.exists(save_path):
+                        mb = os.path.getsize(save_path) / 1024 / 1024
+                        print(f"[OK] {mb:.1f} MB -> {save_path}")
+                        if selected_vid_id:
+                            used_video_ids.add(selected_vid_id)
+                        results.append({
+                            "id": scene_id, "success": True,
+                            "background_path": save_path,
+                            "url": f"/api/uploads/{filename}",
+                            "filename": filename,
+                            "source": "pexels_video"
+                        })
+                    else:
+                        results.append({"id": scene_id, "success": False, "error": "Download aborted (too large)"})
+                else:
+                    results.append({"id": scene_id, "success": False, "error": f"HTTP {dl.status_code}"})
+
+            except requests.Timeout:
+                print(f"[ERR] Download timeout")
+                results.append({"id": scene_id, "success": False, "error": "Download timeout"})
+            except Exception as e:
+                print(f"[ERR] Download error: {e}")
+                results.append({"id": scene_id, "success": False, "error": str(e)})
+
+        return jsonify({"images": results})
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-
-@app.route("/api/search_pexels_videos", methods=["GET", "OPTIONS"])
+# ── Pexels video search / manual download ────────────────────────────────────
+@app.route("/api/search_pexels_videos", methods=["GET","OPTIONS"])
 def search_videos():
-    """Search Pexels for stock videos"""
-    if request.method == "OPTIONS":
-        return "", 200
-    
+    if request.method == "OPTIONS": return "", 200
+    query = request.args.get("query","")
+    if not query: return jsonify({"success":False,"error":"Query required"}), 400
     try:
-        query = request.args.get("query", "")
-        
-        if not query:
-            return jsonify({"success": False, "error": "Query required"}), 400
-        
-        print(f"[INFO] Searching Pexels videos: {query}")
         results = search_pexels_videos(query, per_page=15)
-        
-        return jsonify({
-            "success": True,
-            "results": results,
-            "count": len(results)
-        })
-        
+        return jsonify({"success":True,"results":results,"count":len(results)})
     except Exception as e:
-        print(f"[ERROR] Pexels video search failed: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success":False,"error":str(e)}), 500
 
-
-@app.route("/api/download_pexels_video", methods=["POST", "OPTIONS"])
+@app.route("/api/download_pexels_video", methods=["POST","OPTIONS"])
 def download_video():
-    """Download a Pexels video"""
-    if request.method == "OPTIONS":
-        return "", 200
-    
+    if request.method == "OPTIONS": return "", 200
     try:
         data = request.json
-        url = data.get("url")
-        scene_id = data.get("scene_id")
-        
-        if not url or not scene_id:
-            return jsonify({"success": False, "error": "Missing parameters"}), 400
-        
-        print(f"[INFO] Downloading Pexels video for {scene_id}")
-        
-        filename = f"{scene_id}_pexels_video.mp4"
+        url = data.get("url"); scene_id = data.get("scene_id")
+        if not url or not scene_id: return jsonify({"success":False,"error":"Missing parameters"}), 400
+        filename  = f"{scene_id}_pexels_video.mp4"
         save_path = os.path.join(UPLOADS, filename)
-        
         from pexels_api import download_pexels_media
         result = download_pexels_media(url, save_path)
-        
         if result["success"]:
-            return jsonify({
-                "success": True,
-                "path": save_path,
-                "url": f"/api/uploads/{filename}",
-                "filename": filename
-            })
-        else:
-            return jsonify(result), 500
-            
+            return jsonify({"success":True,"path":save_path,"url":f"/api/uploads/{filename}","filename":filename})
+        return jsonify(result), 500
     except Exception as e:
-        print(f"[ERROR] Pexels video download failed: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
+        return jsonify({"success":False,"error":str(e)}), 500
 
 if __name__ == "__main__":
     print("\n" + "="*60)
     print("🎬 AI Text-to-Video API Server + AVATAR")
     print("="*60)
-    print(f"🌐 CORS: ENABLED (All origins)")
-    print(f"🖼️  Cloudflare: {'✅' if client.get('available', False) else '❌'}")
-    print(f"📸 Pexels: {'✅' if os.getenv('PEXELS_API_KEY') else '❌'}")
-    print(f"🎭 Avatar: ENABLED")
+    print(f"🌐 CORS:         ENABLED (all origins)")
+    print(f"🖼️  Cloudflare:   {'✅' if client.get('available',False) else '❌'}")
+    print(f"📸 Pexels:       {'✅' if os.getenv('PEXELS_API_KEY') else '❌'}")
+    print(f"🎭 Avatar:       ENABLED")
+    print(f"🎵 ElevenLabs:   ALWAYS ON")
+    print(f"🎬 Dynamic mode: /api/generate_images_v2_dynamic")
     print("="*60 + "\n")
-    
     app.run(host="0.0.0.0", port=5001, debug=True)
