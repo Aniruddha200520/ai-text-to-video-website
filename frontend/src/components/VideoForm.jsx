@@ -23,6 +23,19 @@ export default function VideoCreator() {
   const fetchAPI = (url, options = {}) =>
     fetch(url, { ...options, headers: { 'ngrok-skip-browser-warning': 'true', ...options.headers } });
 
+  // Nuclear-safe JSON serializer — strips circular refs, DOM nodes, React fiber refs
+  const safeStringify = (obj) => {
+    const seen = new WeakSet();
+    return JSON.stringify(obj, (key, val) => {
+      if (val !== null && typeof val === 'object') {
+        if (seen.has(val)) return undefined;
+        if (typeof Element !== 'undefined' && val instanceof Element) return undefined;
+        seen.add(val);
+      }
+      return val;
+    });
+  };
+
   useEffect(() => {
     fetchAPI(`${API}/api/health`)
       .then(r => r.json())
@@ -51,7 +64,7 @@ export default function VideoCreator() {
   const [showScript, setShowScript]     = useState(false);
   const [scriptTopic, setScriptTopic]   = useState('');
   const [scriptStyle, setScriptStyle]   = useState('educational');
-  const [scriptDuration, setScriptDuration] = useState(60);
+  const [scriptDuration, setScriptDuration] = useState(30);
   const [genScript, setGenScript]       = useState(false);
 
   // ── render progress ──
@@ -91,13 +104,16 @@ export default function VideoCreator() {
 
   // ── base UI generate mode (static/dynamic toggle for "Generate All") ──
   const [generateMode, setGenerateMode] = useState('dynamic');
+  const [mainKeyword, setMainKeyword] = useState('');
+  const [showKeywordPrompt, setShowKeywordPrompt] = useState(false);
+  const [pendingKeyword, setPendingKeyword] = useState('');
 
   // ── one-click pipeline ──
   // FIX: default pipelineMode to 'dynamic' as requested
   const [showPipeline, setShowPipeline]     = useState(false);
   const [pipelineTopic, setPipelineTopic]   = useState('');
   const [pipelineStyle, setPipelineStyle]   = useState('educational');
-  const [pipelineDuration, setPipelineDuration] = useState(60);
+  const [pipelineDuration, setPipelineDuration] = useState(30);
   const [pipelineAvatar, setPipelineAvatar] = useState('disabled');
   const [pipelineRunning, setPipelineRunning] = useState(false);
   const [pipelineSteps, setPipelineSteps]   = useState([]);
@@ -119,6 +135,19 @@ export default function VideoCreator() {
 
   const [resolvedWill, setResolvedWill]       = useState(VOICE_WILL);
   const [resolvedJessica, setResolvedJessica] = useState(VOICE_JESSICA);
+
+  // Strips React fiber refs / DOM nodes before JSON.stringify — must be defined
+  // before any function that serializes scenes (retry, genImages, render, etc.)
+  const sanitizeScenes = (scns) => scns.map(s => ({
+    id:              s.id,
+    text:            s.text,
+    image_prompt:    s.image_prompt    || '',
+    background_path: s.background_path || '',
+    duration:        s.duration,
+    voice_id:        s.voice_id        || '',
+    preview_url:     s.preview_url     || null,
+    image_source:    s.image_source    || null,
+  }));
 
   useEffect(() => {
     fetchAPI(`${API}/api/voices`, { method: 'GET', headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' } })
@@ -206,7 +235,7 @@ export default function VideoCreator() {
     if (!scriptTopic.trim()) { setStatus('❌ Enter a topic'); return; }
     setGenScript(true); setStatus('🤖 Generating script...');
     try {
-      const r = await fetchAPI(`${API}/api/generate_script`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topic: scriptTopic, style: scriptStyle, duration: scriptDuration }) });
+      const r = await fetchAPI(`${API}/api/generate_script`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: safeStringify({ topic: scriptTopic, style: scriptStyle, duration: scriptDuration }) });
       const d = await r.json();
       if (d.success) { setText(d.script); setStatus(`✅ Generated! (${d.script.split(' ').length} words)`); setShowScript(false); }
       else setStatus(`❌ ${d.error || 'Unknown'}`);
@@ -219,10 +248,10 @@ export default function VideoCreator() {
     if (!text.trim()) { setStatus('❌ Enter text first'); return; }
     setSplitting(true); setStatus('✂️ Splitting...');
     try {
-      const r = await fetchAPI(`${API}/api/split`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+      const r = await fetchAPI(`${API}/api/split`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: safeStringify({ text }) });
       const d = await r.json();
       if (d.scenes) {
-        const voice = useAvatar ? (avatarStyle === 'female' ? resolvedJessica : 'gtts') : VOICE_GTTS;
+        const voice = useAvatar ? (avatarStyle === 'female' ? resolvedJessica : resolvedWill) : VOICE_GTTS;
         setScenes(d.scenes.map(s => ({ ...s, image_prompt: '', voice_id: voice })));
         setStatus(`✅ Split into ${d.scenes.length} scenes`);
       } else setStatus(`❌ ${d.error || 'Unknown'}`);
@@ -231,7 +260,7 @@ export default function VideoCreator() {
   };
 
   // ── scene helpers ──
-  const update   = (i, f, v) => { const u = [...scenes]; u[i][f] = v; setScenes(u); };
+  const update   = (i, f, v) => { const u = [...scenes]; u[i] = { ...u[i], [f]: v }; setScenes(u); };
   const del      = (i) => { setScenes(scenes.filter((_, j) => j !== i)); setStatus(`🗑️ Scene ${i + 1} deleted`); };
   const add      = () => setScenes([...scenes, { id: `scene_${scenes.length + 1}`, text: 'Enter text...', background_path: '', duration: 5, voice_id: useAvatar ? (avatarStyle === 'female' ? resolvedJessica : resolvedWill) : VOICE_GTTS, image_prompt: '' }]);
   const dup      = (i) => { const s = { ...scenes[i], id: `scene_${scenes.length + 1}` }; const u = [...scenes]; u.splice(i + 1, 0, s); setScenes(u); setStatus(`📋 Scene ${i + 1} duplicated`); };
@@ -255,7 +284,7 @@ export default function VideoCreator() {
       setStatus('📤 Uploading...');
       const r = await fetchAPI(`${API}/api/upload_background`, { method: 'POST', body: fd });
       const d = await r.json();
-      if (d.background_path) { update(i, 'background_path', d.background_path); if (d.url) update(i, 'preview_url', `${API}${d.url}`); setStatus('✅ Uploaded!'); }
+      if (d.background_path) { setScenes(prev => { const u = [...prev]; u[i] = { ...u[i], background_path: d.background_path, preview_url: d.url ? `${API}${d.url}` : null }; return u; }); setStatus('✅ Uploaded!'); }
     } catch (e) { setStatus(`❌ ${e.message}`); }
   };
 
@@ -277,8 +306,8 @@ export default function VideoCreator() {
     try {
       setStatus('📥 Downloading...');
       const ep = stockMediaType === 'video' ? '/api/download_pexels_video' : '/api/download_stock';
-      const d = await (await fetchAPI(`${API}${ep}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: media.url, scene_id: scenes[selectedForStock].id, type: media.type }) })).json();
-      if (d.success && d.path) { update(selectedForStock, 'background_path', d.path); if (d.url) update(selectedForStock, 'preview_url', `${API}${d.url}`); update(selectedForStock, 'image_source', 'pexels'); setStatus('✅ Applied!'); setShowStock(false); }
+      const d = await (await fetchAPI(`${API}${ep}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: safeStringify({ url: media.url, scene_id: scenes[selectedForStock].id, type: media.type }) })).json();
+      if (d.success && d.path) { const idx = selectedForStock; setScenes(prev => { const u = [...prev]; u[idx] = { ...u[idx], background_path: d.path, preview_url: d.url ? `${API}${d.url}` : null, image_source: 'pexels' }; return u; }); setStatus('✅ Applied!'); setShowStock(false); }
       else setStatus(`❌ ${d.error || 'Unknown'}`);
     } catch (e) { setStatus(`❌ ${e.message}`); }
   };
@@ -287,26 +316,33 @@ export default function VideoCreator() {
   const retry = async (i) => {
     setRetrying(prev => new Set(prev).add(i)); setStatus(`🔄 Retrying scene ${i + 1}...`);
     try {
-      const d = await (await fetchAPI(`${API}/api/generate_images`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes: [scenes[i]] }) })).json();
-      if (d.images?.[0]?.success) { update(i, 'background_path', d.images[0].background_path); if (d.images[0].url) update(i, 'preview_url', `${API}${d.images[0].url}`); setStatus('✅ Generated!'); }
+      const d = await (await fetchAPI(`${API}/api/generate_images`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: safeStringify({ scenes: sanitizeScenes([scenes[i]]) }) })).json();
+      if (d.images?.[0]?.success) { const img = d.images[0]; setScenes(prev => { const u = [...prev]; u[i] = { ...u[i], background_path: img.background_path, preview_url: img.url ? `${API}${img.url}` : null }; return u; }); setStatus('✅ Generated!'); }
       else setStatus(`❌ ${d.images?.[0]?.error || 'Unknown'}`);
     } catch (e) { setStatus(`❌ ${e.message}`); }
     finally { setRetrying(prev => { const n = new Set(prev); n.delete(i); return n; }); }
   };
 
   // ── gen all images (static or dynamic based on generateMode) ──
-  const genImages = async () => {
+  const genImages = async (keywordOverride) => {
     if (!scenes.length) return;
+    // Ask for keyword before fetching (both static and dynamic benefit from it)
+    if (keywordOverride === undefined) {
+      setPendingKeyword(mainKeyword);
+      setShowKeywordPrompt(true);
+      return;
+    }
+    const kw = keywordOverride !== undefined ? keywordOverride : mainKeyword;
     setLoading(true);
     setStatus(generateMode === 'dynamic' ? '🎬 Fetching Pexels videos...' : '🎨 Generating images...');
     try {
       const endpoint = generateMode === 'dynamic'
         ? `${API}/api/generate_images_v2_dynamic`
         : `${API}/api/generate_images_v2`;
-      const d = await (await fetchAPI(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes }) })).json();
+      const d = await (await fetchAPI(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: safeStringify({ scenes: sanitizeScenes(scenes), main_keyword: kw }) })).json();
       if (d.images) {
-        const u = [...scenes]; let cnt = 0;
-        d.images.forEach(img => { const j = u.findIndex(s => s.id === img.id); if (j >= 0 && img.success) { u[j].background_path = img.background_path; u[j].preview_url = img.url ? `${API}${img.url}` : null; u[j].image_source = img.source; cnt++; } });
+        let cnt = 0;
+        const u = scenes.map(s => { const img = d.images.find(im => im.id === s.id); if (img && img.success) { cnt++; return { ...s, background_path: img.background_path, preview_url: img.url ? `${API}${img.url}` : null, image_source: img.source }; } return s; });
         setScenes(u); setStatus(`✅ ${generateMode === 'dynamic' ? 'Videos' : 'Images'} sourced: ${cnt}/${d.images.length}`);
       }
     } catch (e) { setStatus(`❌ ${e.message}`); }
@@ -326,13 +362,14 @@ export default function VideoCreator() {
   };
 
   // ── render ──
+
   const render = async () => {
     if (!scenes.length) { setStatus('❌ Add scenes first'); return; }
     setLoading(true); setRendering(true); setVideoUrl(null); setStatus('🎬 Rendering...'); startProgressAnimation();
     try {
       const d = await (await fetchAPI(`${API}/api/render`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_name: project, scenes, auto_ai_images: false, subtitles, subtitle_style: subtitleStyle, font_size: fontSize, use_elevenlabs: useAvatar && avatarStyle === 'female', background_music: selectedMusic?.local_path || null, music_volume: musicVolume / 100, use_avatar: useAvatar, avatar_position: avatarPosition, avatar_size: avatarSize, avatar_style: avatarStyle })
+        body: safeStringify({ project_name: project, scenes: sanitizeScenes(scenes), auto_ai_images: false, subtitles, subtitle_style: subtitleStyle, font_size: fontSize, use_elevenlabs: useAvatar && avatarStyle === 'female', background_music: selectedMusic?.local_path || null, music_volume: musicVolume / 100, use_avatar: useAvatar, avatar_position: avatarPosition, avatar_size: avatarSize, avatar_style: avatarStyle })
       })).json();
       stopProgress(!!d.filename);
       if (d.filename) { setVideoUrl({ download: d.download_url, preview: `${API}/api/video/${d.filename}`, filename: d.filename }); setStatus('✅ Video ready!'); }
@@ -349,7 +386,7 @@ export default function VideoCreator() {
 
   // ── save / load ──
   const save = () => {
-    const d = { version: '1.0', project_name: project, settings: { subtitles, subtitleStyle, fontSize, musicVolume, useAvatar, avatarPosition, avatarSize, avatarStyle }, script: text, scenes, music: selectedMusic };
+    const d = { version: '1.0', project_name: project, settings: { subtitles, subtitleStyle, fontSize, musicVolume, useAvatar, avatarPosition, avatarSize, avatarStyle }, script: text, scenes: sanitizeScenes(scenes), music: selectedMusic };
     const b = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
     const u = URL.createObjectURL(b); const l = document.createElement('a'); l.href = u; l.download = `${project}_project.json`;
     document.body.appendChild(l); l.click(); document.body.removeChild(l); URL.revokeObjectURL(u); setStatus('💾 Saved!');
@@ -388,59 +425,111 @@ export default function VideoCreator() {
     const avatarEnabled = pipelineAvatar !== 'disabled';
     const avatarGender = pipelineAvatar === 'disabled' ? 'male' : pipelineAvatar;
     const voice = avatarEnabled
-      ? (avatarGender === 'female' ? resolvedJessica : 'gtts')
+      ? (avatarGender === 'female' ? resolvedJessica : resolvedWill)
       : VOICE_GTTS;
     const autoName = pipelineTopic.trim().toLowerCase().replace(/\s+/g, '_').slice(0, 20);
 
+    // ── Smooth progress that crawls through each step's range ──────────────
+    // Each step owns a % range. A timer ticks every 120ms and inches forward
+    // within that range, slowing near the ceiling so it never "completes" a
+    // step before the real work finishes. On step done we jump to the ceiling.
+    const STEP_RANGES = {
+      script: { lo: 0,  hi: 8,  label: 'Generating script...',      slowAt: 0.85 },
+      split:  { lo: 8,  hi: 14, label: 'Splitting into scenes...',   slowAt: 0.85 },
+      images: { lo: 14, hi: 45, label: 'Fetching videos/images...',  slowAt: 0.80 },
+      render: { lo: 45, hi: 95, label: 'Rendering video...',         slowAt: 0.75 },
+    };
+    let _pctRef = { v: 0 };
+    let _stepRef = { id: 'script' };
+    let _crawlTimer = null;
+
+    const _crawl = () => {
+      const r = STEP_RANGES[_stepRef.id];
+      if (!r) return;
+      const range = r.hi - r.lo;
+      const cur   = _pctRef.v;
+      const frac  = (cur - r.lo) / range;           // 0..1 within this step
+      // Speed: fast at start, slows to a crawl near the ceiling
+      const speed = frac < r.slowAt ? 0.35 : 0.04;
+      const next  = Math.min(r.hi - 0.5, cur + speed);  // never reach ceiling
+      _pctRef.v = next;
+      setProgress(Math.round(next));
+      setStage(r.label);
+      _crawlTimer = setTimeout(_crawl, 120);
+    };
+
+    const _stepDone = (id, nextId) => {
+      // Jump to ceiling of completed step
+      const r = STEP_RANGES[id];
+      if (r) { _pctRef.v = r.hi; setProgress(r.hi); }
+      if (nextId) {
+        _stepRef.id = nextId;
+        const nr = STEP_RANGES[nextId];
+        if (nr) { _pctRef.v = nr.lo; setProgress(nr.lo); setStage(nr.label); }
+      }
+    };
+
+    const _stopCrawl = (ok) => {
+      if (_crawlTimer) clearTimeout(_crawlTimer);
+      setProgress(ok ? 100 : progress);
+      if (ok) setStage('Done!');
+    };
+
+    // kick off crawl
+    setProgress(0); setStage(STEP_RANGES.script.label); setRendering(true);
+    _crawlTimer = setTimeout(_crawl, 200);
+
     try {
       updateStep('script', 'running');
-      const sd = await (await fetchAPI(`${API}/api/generate_script`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topic: pipelineTopic, style: pipelineStyle, duration: pipelineDuration }) })).json();
+      const sd = await (await fetchAPI(`${API}/api/generate_script`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: safeStringify({ topic: pipelineTopic, style: pipelineStyle, duration: pipelineDuration }) })).json();
       if (!sd.success) throw new Error(sd.error || 'Script failed');
       setText(sd.script);
       updateStep('script', 'done', `${sd.script.split(' ').length} words generated`);
+      _stepDone('script', 'split');
 
       updateStep('split', 'running');
-      const spd = await (await fetchAPI(`${API}/api/split`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: sd.script }) })).json();
+      const spd = await (await fetchAPI(`${API}/api/split`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: safeStringify({ text: sd.script }) })).json();
       if (!spd.scenes) throw new Error(spd.error || 'Split failed');
       const newScenes = spd.scenes.map(s => ({ ...s, image_prompt: '', voice_id: voice }));
       setScenes(newScenes);
       updateStep('split', 'done', `${newScenes.length} scenes created`);
+      _stepDone('split', 'images');
 
       const imgEndpoint = pipelineMode === 'dynamic'
         ? `${API}/api/generate_images_v2_dynamic`
         : `${API}/api/generate_images_v2`;
       updateStep('images', 'running');
-      const imgd = await (await fetchAPI(imgEndpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes: newScenes }) })).json();
+      const imgd = await (await fetchAPI(imgEndpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: safeStringify({ scenes: sanitizeScenes(newScenes), main_keyword: pipelineTopic.trim() }) })).json();
       let swi = [...newScenes]; let cnt = 0;
       if (imgd.images) {
-        imgd.images.forEach(img => { const j = swi.findIndex(s => s.id === img.id); if (j >= 0 && img.success) { swi[j].background_path = img.background_path; swi[j].preview_url = img.url ? `${API}${img.url}` : null; cnt++; } });
+        swi = swi.map(s => { const img = imgd.images.find(im => im.id === s.id); if (img && img.success) { cnt++; return { ...s, background_path: img.background_path, preview_url: img.url ? `${API}${img.url}` : null }; } return s; });
         setScenes(swi);
       }
       const modeLabel = pipelineMode === 'dynamic' ? 'videos' : 'images';
       updateStep('images', 'done', `${cnt}/${newScenes.length} ${modeLabel} sourced`);
+      _stepDone('images', 'render');
 
       updateStep('render', 'running');
-      startProgressAnimation(); setRendering(true);
       const rd = await (await fetchAPI(`${API}/api/render`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_name: autoName, scenes: swi, auto_ai_images: false,
+        body: safeStringify({
+          project_name: autoName, scenes: sanitizeScenes(swi), auto_ai_images: false,
           subtitles, subtitle_style: subtitleStyle, font_size: fontSize,
-          use_elevenlabs: useAvatar && avatarStyle === 'female', background_music: selectedMusic?.local_path || null,
+          use_elevenlabs: avatarEnabled, background_music: selectedMusic?.local_path || null,
           music_volume: musicVolume / 100,
           use_avatar: avatarEnabled, avatar_position: avatarPosition,
           avatar_size: avatarSize,
           avatar_style: avatarGender
         })
       })).json();
-      stopProgress(!!rd.filename); setRendering(false);
+      _stopCrawl(!!rd.filename); setRendering(false);
       if (!rd.filename) throw new Error(rd.error || 'Render failed');
       setVideoUrl({ download: rd.download_url, preview: `${API}/api/video/${rd.filename}`, filename: rd.filename });
       setProject(autoName);
       updateStep('render', 'done', 'Video ready!');
       setPipelineDone(true); setStatus('✅ Pipeline complete!');
     } catch (err) {
-      stopProgress(false); setRendering(false);
+      _stopCrawl(false); setRendering(false);
       setPipelineError(err.message);
       setPipelineSteps(prev => prev.map(s => s.status === 'running' ? { ...s, status: 'error' } : s));
     } finally { setPipelineRunning(false); }
@@ -449,6 +538,52 @@ export default function VideoCreator() {
   // ────────────────────────────────────────────────
   return (
     <div className="h-screen flex flex-col bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white overflow-hidden">
+
+      {/* KEYWORD PROMPT MODAL — shown before dynamic Pexels fetch */}
+      {showKeywordPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-slate-800 border border-purple-500/40 rounded-2xl p-7 w-[380px] shadow-2xl">
+            <h3 className="text-lg font-bold text-white mb-1">Main Topic / Keyword</h3>
+            <p className="text-slate-400 text-sm mb-4">
+              Enter the core subject so Pexels finds relevant clips for every scene.<br/>
+              <span className="text-purple-300">e.g. "electric vehicles", "cats", "coffee shop"</span>
+            </p>
+            <input
+              type="text"
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-400 text-sm mb-5 focus:outline-none focus:border-purple-500"
+              placeholder="Type your main keyword..."
+              value={pendingKeyword}
+              onChange={e => setPendingKeyword(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  setMainKeyword(pendingKeyword);
+                  setShowKeywordPrompt(false);
+                  genImages(pendingKeyword);
+                }
+              }}
+              autoFocus
+            />
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowKeywordPrompt(false)}
+                className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm text-slate-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setMainKeyword(pendingKeyword);
+                  setShowKeywordPrompt(false);
+                  genImages(pendingKeyword);
+                }}
+                className="px-5 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-sm font-semibold transition-colors"
+              >
+                Fetch Videos
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* HEADER */}
       <div className="flex-shrink-0 bg-black/30 backdrop-blur-sm border-b border-purple-500/30 px-6 py-3">
@@ -651,7 +786,7 @@ export default function VideoCreator() {
 
                   {/* ── Generate All button (separate) ── */}
                   <button
-                    onClick={genImages}
+                    onClick={() => genImages()}
                     disabled={loading}
                     className={`px-4 py-2 text-sm font-semibold rounded-xl transition-all disabled:opacity-50 ${
                       generateMode === 'dynamic'
@@ -799,7 +934,6 @@ export default function VideoCreator() {
             <div className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 border-b border-slate-700/50 px-6 py-5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-red-500 to-red-700 flex items-center justify-center text-white text-lg shadow-lg select-none">▶</div>
                   <div>
                     <h2 className="text-base font-bold text-slate-100 tracking-tight">One-Click Generate</h2>
                     <p className="text-xs text-slate-400">Type a topic — AI handles everything</p>
@@ -893,15 +1027,21 @@ export default function VideoCreator() {
               )}
 
               {/* Progress */}
-              {pipelineRunning && (
+              {(pipelineRunning || pipelineDone) && (
                 <div className="bg-slate-700/30 rounded-xl px-4 py-3 border border-slate-600/30">
-                  <div className="flex justify-between mb-2">
-                    <span className="text-xs font-semibold text-slate-400">Progress</span>
-                    <span className="text-xs text-purple-400">{stage}</span>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs text-slate-300">{stage}</span>
+                    <span className="text-sm font-bold text-white">{pipelineDone ? 100 : progress}%</span>
                   </div>
-                  <div className="h-1.5 bg-slate-600/50 rounded-full overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-purple-500 to-pink-500 rounded-full transition-all duration-400"
-                         style={{width:`${Math.round((pipelineSteps.filter(s=>s.status==='done').length/Math.max(pipelineSteps.length,1))*100)}%`}} />
+                  <div className="h-3 bg-slate-600/50 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full transition-all duration-300 ease-out bg-gradient-to-r ${
+                      pipelineDone ? 'from-green-500 to-emerald-400' :
+                      progress > 60 ? 'from-red-500 to-rose-400' :
+                      progress > 30 ? 'from-red-600 to-pink-500' :
+                      'from-purple-500 to-pink-500'
+                    }`} style={{width:`${pipelineDone ? 100 : progress}%`}}>
+
+                    </div>
                   </div>
                 </div>
               )}

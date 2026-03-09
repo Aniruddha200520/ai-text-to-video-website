@@ -21,6 +21,7 @@ from io import BytesIO
 import numpy as np
 import torch
 import cv2
+import threading as _threading
 
 # ── GPU via PyTorch CUDA ──────────────────────────────────────────────────────
 if not torch.cuda.is_available():
@@ -68,6 +69,7 @@ ELEVENLABS_API_KEYS = [k.strip() for k in _raw_el_keys.split(",")
                        if k.strip() and k.strip() != "your_elevenlabs_key_here"]
 ELEVENLABS_API_KEY  = ELEVENLABS_API_KEYS[0] if ELEVENLABS_API_KEYS else None
 _el_key_index       = 0
+_el_key_lock        = _threading.Lock()
 CLOUDFLARE_WORKER_URL = os.getenv("CLOUDFLARE_WORKER_URL")
 PEXELS_API_KEY        = os.getenv("PEXELS_API_KEY")
 
@@ -493,7 +495,8 @@ def composite_avatar_on_video(video_clip, wav2lip_path: str,
                                subtitle_segments=None,
                                vw_out: int = 1280,
                                vh_out: int = 720,
-                               font_size: int = 18):
+                               font_size: int = 18,
+                               speech_dur: float = None):
     import time as _t
     ff = FFMPEG_PATH or "ffmpeg"
 
@@ -539,13 +542,12 @@ def composite_avatar_on_video(video_clip, wav2lip_path: str,
     alpha_bgr = build_static_alpha(frames_bgr, cache_key=sized_key, feather=2,
                                    avatar_style=avatar_style)
 
-    frames_rgb = []
-    for frm in frames_bgr:
-        rgb = cv2.cvtColor(frm, cv2.COLOR_BGR2RGB)
-        # LANCZOS4 for upscaling (sharper), AREA for downscaling
-        interp = cv2.INTER_LANCZOS4 if (aw * ah > frm.shape[1] * frm.shape[0]) else cv2.INTER_AREA
-        rgb = cv2.resize(rgb, (aw, ah), interpolation=interp)
-        frames_rgb.append(rgb)
+    # Resize frames to target avatar size first, THEN build alpha from resized frames.
+    # This ensures alpha mask dimensions always exactly match the display frames —
+    # building alpha from raw frames and resizing separately can cause 1-2px mismatch
+    # which produces blurry semi-transparent fringing on some scenes.
+    interp = cv2.INTER_LANCZOS4 if (aw * ah > frames_bgr[0].shape[1] * frames_bgr[0].shape[0]) else cv2.INTER_AREA
+    frames_bgr_resized = [cv2.resize(f, (aw, ah), interpolation=interp) for f in frames_bgr]
 
     if alpha_bgr is not None:
         a1 = alpha_bgr[:, :, 0] if alpha_bgr.ndim == 3 else alpha_bgr
@@ -554,6 +556,8 @@ def composite_avatar_on_video(video_clip, wav2lip_path: str,
         alpha_uint8 = (a1 * 255).clip(0, 255).astype(np.uint8)
     else:
         alpha_uint8 = np.full((ah, aw), 255, dtype=np.uint8)
+
+    frames_rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in frames_bgr_resized]
 
     print(f"[OK] {n_av} avatar frames ready ({aw}×{ah})")
 
@@ -591,24 +595,59 @@ def composite_avatar_on_video(video_clip, wav2lip_path: str,
             print(f"[INFO] Building bg via ffmpeg concat ({len(valid)} clips)...")
             t0 = _t.time()
             inputs, fparts = [], []
+            import subprocess as _sp2
+            # Separate images vs videos — images need -loop 1 before -i
+            # Build inputs list in two passes to keep -loop 1 flags correct
+            inputs = []
             for idx, (p, dur) in enumerate(valid):
-                inputs += ["-i", p]
-                # FIX: Use loop+trim instead of bare trim so short video clips
-                # (e.g. 3.9s clip needing 5s) are looped to fill the duration.
-                # The old tpad caused double-processing. loop+trim is correct and fast.
-                fparts.append(
-                    f"[{idx}:v]setpts=PTS-STARTPTS,"
-                    f"loop=loop=-1:size=32767:start=0,"
-                    f"trim=duration={dur:.3f},setpts=PTS-STARTPTS,"
-                    f"scale={vw}:{vh}:force_original_aspect_ratio=decrease,"
-                    f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2,fps={vfps}[v{idx}]"
-                )
+                ext = os.path.splitext(p)[1].lower()
+                is_image = ext in ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+                if is_image:
+                    inputs += ["-loop", "1", "-t", str(dur), "-i", p]
+                else:
+                    inputs += ["-i", p]
+
+            for idx, (p, dur) in enumerate(valid):
+                ext = os.path.splitext(p)[1].lower()
+                is_image = ext in ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+                if is_image:
+                    fparts.append(
+                        f"[{idx}:v]setpts=PTS-STARTPTS,"
+                        f"scale={vw}:{vh}:force_original_aspect_ratio=decrease,"
+                        f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2,fps={vfps}[v{idx}]"
+                    )
+                else:
+                    # Probe actual clip duration to decide whether to loop
+                    try:
+                        _pr = _sp2.run(
+                            [ff, "-v", "error", "-show_entries", "format=duration",
+                             "-of", "default=noprint_wrappers=1:nokey=1", p],
+                            capture_output=True, text=True, timeout=5)
+                        _clip_dur = float(_pr.stdout.strip())
+                    except Exception:
+                        _clip_dur = dur
+                    if _clip_dur < dur:
+                        fparts.append(
+                            f"[{idx}:v]setpts=PTS-STARTPTS,"
+                            f"loop=loop=-1:size=32767:start=0,"
+                            f"trim=duration={dur:.3f},setpts=PTS-STARTPTS,"
+                            f"scale={vw}:{vh}:force_original_aspect_ratio=decrease,"
+                            f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2,fps={vfps}[v{idx}]"
+                        )
+                    else:
+                        # Long enough — just trim, no loop (fast, no freeze)
+                        fparts.append(
+                            f"[{idx}:v]trim=duration={dur:.3f},setpts=PTS-STARTPTS,"
+                            f"scale={vw}:{vh}:force_original_aspect_ratio=decrease,"
+                            f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2,fps={vfps}[v{idx}]"
+                        )
             cin = "".join(f"[v{i}]" for i in range(len(valid)))
             fstr = ";".join(fparts) + f";{cin}concat=n={len(valid)}:v=1:a=0[vout]"
             res = subprocess.run(
                 [ff, "-y"] + inputs +
                 ["-filter_complex", fstr, "-map", "[vout]",
-                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-crf", "28",
+                 "-c:v", "libx264", "-preset", "ultrafast", "-threads", "0",
+                 "-pix_fmt", "yuv420p", "-crf", "28",
                  bg_temp],
                 capture_output=True, timeout=300)
             if res.returncode != 0 or not os.path.exists(bg_temp):
@@ -620,23 +659,54 @@ def composite_avatar_on_video(video_clip, wav2lip_path: str,
                 bg_src = bg_temp
 
     if not bg_src:
-        print("[WARN] No bg source, returning original clip")
-        try: os.remove(av_path)
-        except: pass
-        return video_clip
+        # Instead of giving up, generate a solid black background so avatar still composites
+        print("[WARN] No bg source — generating black background for avatar composite")
+        try:
+            _black_tmp = os.path.join(TEMP_DIR, f"_blackbg_{uuid.uuid4().hex[:8]}.mp4")
+            _total_s   = video_clip.duration
+            _blk_cmd   = [ff, "-y", "-f", "lavfi",
+                          "-i", f"color=c=black:s={vw}x{vh}:r={vfps}:d={_total_s:.3f}",
+                          "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                          _black_tmp]
+            _blk_res = subprocess.run(_blk_cmd, capture_output=True, timeout=60)
+            if _blk_res.returncode == 0 and os.path.exists(_black_tmp):
+                bg_src = _black_tmp
+                bg_temp = _black_tmp
+                print(f"[INFO] Black bg generated: {_black_tmp}")
+            else:
+                print("[ERR] Black bg generation failed, returning original clip")
+                try: os.remove(av_path)
+                except: pass
+                return video_clip
+        except Exception as _be:
+            print(f"[ERR] Black bg failed: {_be}")
+            try: os.remove(av_path)
+            except: pass
+            return video_clip
 
     # Use sum of scene durations directly — MoviePy concatenation adds tiny gaps
     total_dur = sum(d for _, d in (scene_bg_paths or [])) or video_clip.duration
     out_comp  = os.path.join(TEMP_DIR, f"_comp_{uuid.uuid4().hex[:8]}.mp4")
+
+    # Trim avatar to the actual SPEECH duration (t_wav fed to wav2lip).
+    # audio_path is the full mixed track = total_dur, useless for trimming.
+    # speech_dur is probed from t_wav in create_avatar_overlay before this call.
+    if speech_dur and speech_dur > 0:
+        av_trim_dur = min(speech_dur, total_dur)
+        print(f"[INFO] Avatar trim: speech={speech_dur:.2f}s / total={total_dur:.2f}s → trim={av_trim_dur:.2f}s")
+    else:
+        av_trim_dur = total_dur
 
     fc_parts = []
     fc_parts.append(
         f"[0:v]scale={vw_out}:{vh_out}:force_original_aspect_ratio=decrease,"
         f"pad={vw_out}:{vh_out}:(ow-iw)/2:(oh-ih)/2,fps={vfps}[bg]"
     )
+    # Loop avatar only for its actual lip-synced duration, then freeze last frame
     fc_parts.append(
         f"[1:v]loop=loop=-1:size={n_av}:start=0,"
-        f"trim=duration={total_dur:.3f},setpts=PTS-STARTPTS[av]"
+        f"trim=duration={av_trim_dur:.3f},setpts=PTS-STARTPTS,"
+        f"tpad=stop_mode=clone:stop_duration={max(0, total_dur - av_trim_dur):.3f}[av]"
     )
     fc_parts.append(f"[bg][av]overlay={ax}:{ay}:format=auto[ov]")
 
@@ -763,6 +833,20 @@ def create_avatar_overlay(video_clip, audio_clip, avatar_config: dict,
     print(f"[DEBUG] PRESENTER_PHOTO={presenter}, exists={os.path.exists(presenter)}")
     if t_wav and os.path.exists(WAV2LIP_RUNNER) and os.path.exists(presenter):
         if run_wav2lip(t_wav, t_out, avatar_style=style):
+            # Probe the speech audio duration — this is exactly how long lips should move
+            _speech_dur = None
+            try:
+                _sp_probe = subprocess.run(
+                    [ff, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", t_wav],
+                    capture_output=True, text=True, timeout=10)
+                _speech_dur = float(_sp_probe.stdout.strip())
+                # Subtract a small buffer to account for WAV header/padding silence
+                # that ffmpeg adds during mp3→wav conversion (~0.5s typical)
+                _speech_dur = max(0.1, _speech_dur - 1.0)
+                print(f"[INFO] Speech duration for avatar trim: {_speech_dur:.2f}s")
+            except Exception:
+                pass
             result = composite_avatar_on_video(video_clip, t_out, pos, size,
                                                avatar_style=style,
                                                bg_video_path=bg_video_path,
@@ -771,11 +855,11 @@ def create_avatar_overlay(video_clip, audio_clip, avatar_config: dict,
                                                subtitle_segments=subtitle_segments,
                                                vw_out=video_clip.size[0],
                                                vh_out=video_clip.size[1],
-                                               font_size=font_size)
+                                               font_size=font_size,
+                                               speech_dur=_speech_dur)
             for p in (t_wav, t_out):
                 try: os.remove(p)
                 except: pass
-            print("[OK] Avatar overlay complete!")
             return result
         print("[ERR] Wav2Lip failed")
 
@@ -970,10 +1054,11 @@ def _resolve_voice_ids():
 def _rotate_elevenlabs_key():
     global _el_key_index, ELEVENLABS_API_KEY
     from elevenlabs import set_api_key
-    _el_key_index = (_el_key_index + 1) % len(ELEVENLABS_API_KEYS)
-    ELEVENLABS_API_KEY = ELEVENLABS_API_KEYS[_el_key_index]
-    set_api_key(ELEVENLABS_API_KEY)
-    print(f"[INFO] ElevenLabs: rotated to key #{_el_key_index + 1}")
+    with _el_key_lock:
+        _el_key_index = (_el_key_index + 1) % len(ELEVENLABS_API_KEYS)
+        ELEVENLABS_API_KEY = ELEVENLABS_API_KEYS[_el_key_index]
+        set_api_key(ELEVENLABS_API_KEY)
+        print(f"[INFO] ElevenLabs: rotated to key #{_el_key_index + 1}")
 
 
 def tts_elevenlabs(text, out_path, voice_id=None):
@@ -983,20 +1068,52 @@ def tts_elevenlabs(text, out_path, voice_id=None):
     from elevenlabs import generate, set_api_key
 
     vid = voice_id if (voice_id and voice_id.strip()) else VOICE_WILL
-    print(f"    [TTS] voice={vid} | key=#{_el_key_index + 1}/{len(ELEVENLABS_API_KEYS)}")
 
-    for attempt in range(len(ELEVENLABS_API_KEYS)):
+    # Try each key once; lock ensures only one thread rotates at a time
+    max_attempts = len(ELEVENLABS_API_KEYS) * 2   # allow one full rotation cycle
+    for attempt in range(max_attempts):
+        with _el_key_lock:
+            cur_idx = _el_key_index
+            cur_key = ELEVENLABS_API_KEYS[cur_idx]
+        print(f"    [TTS] voice={vid} | key=#{cur_idx + 1}/{len(ELEVENLABS_API_KEYS)}")
         try:
-            set_api_key(ELEVENLABS_API_KEYS[_el_key_index])
+            set_api_key(cur_key)
             audio = generate(text=text, voice=vid, model="eleven_turbo_v2")
             with open(out_path, "wb") as f: f.write(audio)
             return out_path
         except Exception as e:
             err = str(e).lower()
-            is_quota = any(k in err for k in ("quota", "credit", "limit", "exceeded", "insufficient"))
+            is_quota   = any(k in err for k in ("quota", "credit", "limit", "exceeded", "insufficient"))
+            is_invalid = any(k in err for k in ("invalid", "unauthorized", "401", "403"))
             if is_quota and len(ELEVENLABS_API_KEYS) > 1:
-                print(f"    [WARN] Key #{_el_key_index + 1} quota exceeded, rotating...")
+                # Parallel threads can all trip quota simultaneously on a healthy key.
+                # Wait 2s and retry the SAME key once before rotating — avoids false exhaustion.
+                import time as _ttime
+                print(f"    [WARN] Key #{cur_idx + 1} quota signal — waiting 2s then retrying...")
+                _ttime.sleep(2)
+                with _el_key_lock:
+                    still_same = (_el_key_index == cur_idx)
+                if still_same:
+                    # Retry same key — if it fails again, THEN rotate
+                    try:
+                        set_api_key(cur_key)
+                        audio = generate(text=text, voice=vid, model="eleven_turbo_v2")
+                        with open(out_path, "wb") as f: f.write(audio)
+                        return out_path
+                    except Exception as e2:
+                        err2 = str(e2).lower()
+                        if any(k in err2 for k in ("quota", "credit", "limit", "exceeded", "insufficient")):
+                            print(f"    [WARN] Key #{cur_idx + 1} confirmed quota exceeded, rotating...")
+                            _rotate_elevenlabs_key()
+                        else:
+                            raise
+                continue
+            if is_invalid and len(ELEVENLABS_API_KEYS) > 1:
+                print(f"    [WARN] Key #{cur_idx + 1} invalid, rotating...")
                 _rotate_elevenlabs_key()
+                with _el_key_lock:
+                    if _el_key_index == 0 and attempt >= len(ELEVENLABS_API_KEYS) - 1:
+                        break
                 continue
             raise
 
@@ -1239,7 +1356,7 @@ def render_video(project_name, scenes, auto_ai=True, size=(1280, 720), fps=25,
                  subtitles=True, subtitle_style="bottom", font_size=18,
                  use_elevenlabs=False, background_music=None, music_volume=0.1,
                  use_avatar=False, avatar_position="bottom-right",
-                 avatar_size="medium", avatar_style="male"):
+                 avatar_size="medium", avatar_style="male", main_keyword=""):
 
     print(f"[INFO] Rendering {size[0]}×{size[1]} @ {fps} fps | {len(scenes)} scenes")
     if use_avatar:
@@ -1265,76 +1382,105 @@ def render_video(project_name, scenes, auto_ai=True, size=(1280, 720), fps=25,
     # We CANNOT rely on clip.audio.filename after subclip() — subclip loses .filename.
     scene_audio_info  = []   # list of (aud_path | None, scene_duration_float)
 
-    MIN_SCENE_DUR = 5.0      # minimum scene duration — clips shorter than audio still
-                              # get padded to at least this so video never feels rushed
+    MIN_SCENE_DUR = 5.0      # minimum scene duration
+
+    # ── PRE-GENERATE ALL TTS IN PARALLEL ─────────────────────────────────────
+    # Generate audio for all scenes concurrently so N scenes ≈ time of 1 scene.
+    # Results stored in tts_cache keyed by scene id.
+    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac2
+
+    _resolve_voice_ids()
+
+    # Resolve default voice once (thread-safe: read-only after this point)
+    _default_voice_id = (
+        VOICE_JESSICA if (use_avatar and avatar_style == "female" and VOICE_JESSICA)
+        else (VOICE_WILL if (VOICE_WILL and use_elevenlabs) else "gtts")
+    )
+    print(f"[INFO] Default TTS voice for this render: {_default_voice_id}")
+
+    def _tts_one(s):
+        sid      = s.get("id", "scene")
+        text     = (s.get("text") or "").strip()
+        duration = max(float(s.get("duration") or MIN_SCENE_DUR), MIN_SCENE_DUR)
+        if not text:
+            return sid, None, None, duration
+
+        voice_id = (s.get("voice_id") or "").strip() or _default_voice_id
+
+        aud_path = os.path.join(GEN_AUD, f"{sid}_{uuid.uuid4().hex[:6]}.mp3")
+        _ff = FFMPEG_PATH or "ffmpeg"
+        try:
+            tts_generate(text, aud_path, voice_id=voice_id, use_elevenlabs=use_elevenlabs)
+            # Strip internal silences
+            _desilenced = aud_path.replace(".mp3", "_ds.mp3")
+            _dsr = subprocess.run(
+                [_ff, "-y", "-i", aud_path,
+                 "-af", (
+                     "silenceremove="
+                     "stop_periods=-1:"
+                     "stop_duration=0.4:"
+                     "stop_threshold=-35dB"
+                 ),
+                 "-c:a", "libmp3lame", "-q:a", "2", _desilenced],
+                capture_output=True, timeout=30)
+            if _dsr.returncode == 0 and os.path.exists(_desilenced) and os.path.getsize(_desilenced) > 500:
+                import shutil as _sh3; _sh3.move(_desilenced, aud_path)
+            else:
+                try: os.remove(_desilenced)
+                except: pass
+            clip = AudioFileClip(aud_path)
+            raw_dur = max(0.1, clip.duration)
+            trimmed = max(0.1, raw_dur - AUDIO_TAIL_TRIM)
+            clip    = clip.subclip(0, trimmed)
+            if trimmed > duration:
+                duration = trimmed
+            duration = max(duration, MIN_SCENE_DUR)
+            return sid, aud_path, clip, duration
+        except Exception as e:
+            print(f"[ERR] TTS {sid}: {e}")
+            if use_elevenlabs:
+                try:
+                    tts_gtts(text, aud_path)
+                    clip = AudioFileClip(aud_path)
+                    raw_dur = max(0.1, clip.duration)
+                    trimmed = max(0.1, raw_dur - AUDIO_TAIL_TRIM)
+                    clip    = clip.subclip(0, trimmed)
+                    if trimmed > duration: duration = trimmed
+                    duration = max(duration, MIN_SCENE_DUR)
+                    return sid, aud_path, clip, duration
+                except: pass
+            return sid, None, None, duration
+
+    print(f"[INFO] Pre-generating TTS for {len(scenes)} scenes in parallel...")
+    tts_cache = {}  # sid -> (aud_path, audio_clip, duration)
+    with _TPE(max_workers=min(len(scenes), 10)) as pool:
+        futs = {pool.submit(_tts_one, s): s["id"] for s in scenes}
+        for fut in _ac2(futs):
+            sid, aud_path, clip, duration = fut.result()
+            tts_cache[sid] = (aud_path, clip, duration)
+    print(f"[INFO] TTS pre-generation done — {len(tts_cache)} scenes ready")
+    # ─────────────────────────────────────────────────────────────────────────
 
     for i, s in enumerate(scenes):
         print(f"\n[INFO] Scene {i+1}/{len(scenes)}")
         text     = (s.get("text") or "").strip()
         bg       = (s.get("background_path") or "").strip() or None
-        duration = max(float(s.get("duration") or MIN_SCENE_DUR), MIN_SCENE_DUR)
 
-        _resolve_voice_ids()
-        voice_id = (s.get("voice_id") or "").strip()
-        if not voice_id:
-            if use_avatar and avatar_style == "female":
-                voice_id = VOICE_JESSICA
-                print(f"    [Voice] Female avatar → ElevenLabs {voice_id}")
-            else:
-                voice_id = "gtts"
-                print(f"    [Voice] → Google TTS (free)")
-
-        audio     = None
-        aud_path  = None      # keep the raw file path separately
-
-        if text:
-            aud_path = os.path.join(GEN_AUD,
-                                    f"{s.get('id','scene')}_{uuid.uuid4().hex[:6]}.mp3")
-            try:
-                tts_generate(text, aud_path, voice_id=voice_id,
-                             use_elevenlabs=use_elevenlabs)
-                # Strip long internal silences ElevenLabs adds between words/phrases.
-                # stop_periods=1 removes silence within the stream; threshold=-35dB catches
-                # natural pauses while preserving normal speech rhythm.
-                _ff = FFMPEG_PATH or "ffmpeg"
-                _desilenced = aud_path.replace(".mp3", "_ds.mp3")
-                _dsr = subprocess.run(
-                    [_ff, "-y", "-i", aud_path,
-                     "-af", (
-                         "silenceremove="
-                         "stop_periods=-1:"          # remove all silent gaps in stream
-                         "stop_duration=0.4:"        # gaps longer than 0.4s get trimmed
-                         "stop_threshold=-35dB"      # anything below -35dB = silence
-                     ),
-                     "-c:a", "libmp3lame", "-q:a", "2", _desilenced],
-                    capture_output=True, timeout=30)
-                if _dsr.returncode == 0 and os.path.exists(_desilenced) and os.path.getsize(_desilenced) > 500:
-                    import shutil as _sh3
-                    _sh3.move(_desilenced, aud_path)   # replace original with desilenced
+        # Resolve bg path — frontend may send absolute path OR just filename
+        if bg:
+            if not os.path.exists(bg):
+                # Try resolving as relative to UPLOADS dir
+                candidate = os.path.join(UPLOADS, os.path.basename(bg))
+                if os.path.exists(candidate):
+                    bg = candidate
                 else:
-                    try: os.remove(_desilenced)
-                    except: pass
-                audio = AudioFileClip(aud_path)
-            except Exception as e:
-                print(f"[ERR] TTS: {e}")
-                if use_elevenlabs:
-                    try:
-                        tts_gtts(text, aud_path)
-                        audio = AudioFileClip(aud_path)
-                    except:
-                        aud_path = None
+                    print(f"[WARN] bg path not found: {bg!r}")
+                    bg = None
 
-        if audio:
-            try:
-                raw_dur = max(0.1, audio.duration)
-                trimmed = max(0.1, raw_dur - AUDIO_TAIL_TRIM)
-                # subclip loses .filename — we keep aud_path separately
-                audio   = audio.subclip(0, trimmed)
-                # scene duration = max(speech, minimum)
-                if trimmed > duration:
-                    duration = trimmed
-            except:
-                pass
+        # Pull pre-generated TTS result
+        sid = s.get("id", f"scene_{i+1}")
+        aud_path, audio, duration = tts_cache.get(sid, (None, None, MIN_SCENE_DUR))
+        duration = max(duration, MIN_SCENE_DUR)
 
         # Enforce minimum scene duration even if we have no audio
         duration = max(duration, MIN_SCENE_DUR)
@@ -1350,7 +1496,8 @@ def render_video(project_name, scenes, auto_ai=True, size=(1280, 720), fps=25,
         try:   bg_clip = background_clip(bg, duration, size=size)
         except Exception as e: print(f"[ERR] BG: {e}"); raise
 
-        if bg and bg.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm')):
+        # Pass bg path for both videos AND images — bg concat handles both
+        if bg and os.path.exists(bg):
             scene_bg_paths.append((bg, duration))
         else:
             scene_bg_paths.append((None, duration))
@@ -1506,86 +1653,177 @@ def render_video(project_name, scenes, auto_ai=True, size=(1280, 720), fps=25,
         # Avatar path: composite already has everything baked in
         comp_path = getattr(final, "filename", None)
         if comp_path and os.path.exists(comp_path) and os.path.getsize(comp_path) > 10000:
-            import shutil as _shutil
-            _shutil.copy2(comp_path, out_path)
+            if background_music and os.path.exists(background_music):
+                try:
+                    _music_mixed = os.path.join(TEMP_DIR, f"_music_{uuid.uuid4().hex[:8]}.mp4")
+                    _vol = music_volume if music_volume else 0.1
+                    _bm  = background_music.replace("\\", "/")
+                    _mix_cmd = [ff, "-y", "-i", comp_path, "-stream_loop", "-1",
+                                "-i", background_music,
+                                "-filter_complex",
+                                f"[0:a]volume=1.0[a1];[1:a]volume={_vol}[a2];[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                                "-map", "0:v", "-map", "[aout]",
+                                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                                "-shortest", "-movflags", "+faststart", _music_mixed]
+                    _mr = subprocess.run(_mix_cmd, capture_output=True, timeout=120)
+                    if _mr.returncode == 0 and os.path.exists(_music_mixed):
+                        import shutil as _shutil
+                        _shutil.copy2(_music_mixed, out_path)
+                        try: os.remove(_music_mixed)
+                        except: pass
+                        print(f"[INFO] Background music mixed in (avatar path)")
+                    else:
+                        print(f"[WARN] Music mix failed: {_mr.stderr.decode(errors='replace')[-200:]}")
+                        import shutil as _shutil
+                        _shutil.copy2(comp_path, out_path)
+                except Exception as _me:
+                    print(f"[WARN] Music mix error: {_me}")
+                    import shutil as _shutil
+                    _shutil.copy2(comp_path, out_path)
+            else:
+                import shutil as _shutil
+                _shutil.copy2(comp_path, out_path)
             if os.path.exists(out_path):
                 print(f"[OK] {os.path.basename(out_path)}")
                 return out_path
             print("[WARN] Copy failed, falling back")
 
-        # No-avatar path — pure ffmpeg concat + NVENC, no MoviePy
+        # No-avatar path — same two-step as avatar path:
+        # Step 1: bg concat → temp file (fast, low memory, no freeze)
+        # Step 2: composite (subtitles) + encode with audio
         valid_segs = [(p, d) for p, d in scene_bg_paths if p and os.path.exists(p)]
         if valid_segs and not use_avatar:
-            print(f"[INFO] ffmpeg concat+encode (no avatar, {len(valid_segs)} clips)...")
-            # Build ASS subtitle file for no-avatar path
-            ass_path = None
-            if subtitles and subtitle_segments:
-                import re as _re3
-                def _ts_ass3(s):
-                    h = int(s//3600); m = int((s%3600)//60); sec = s%60
-                    cs = int((sec%1)*100); sec = int(sec)
-                    return f"{h}:{m:02d}:{sec:02d}.{cs:02d}"
-                ass_path = os.path.join(TEMP_DIR, f"_subs_{uuid.uuid4().hex[:8]}.ass")
-                ass_hdr = (
-                    "[Script Info]\nScriptType: v4.00+\n"
-                    f"PlayResX: {vw}\nPlayResY: {vh}\nWrapStyle: 1\n\n"
-                    "[V4+ Styles]\n"
-                    "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,"
-                    "OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,"
-                    "ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
-                    "Alignment,MarginL,MarginR,MarginV,Encoding\n"
-                    "Style: Default,Arial,22,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,"
-                    "1,0,0,0,100,100,0,0,1,2,0,2,20,20,30,1\n\n"
-                    "[Events]\n"
-                    "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
-                )
-                with open(ass_path, "w", encoding="utf-8") as sf:
-                    sf.write(ass_hdr)
-                    for txt, ts, te in subtitle_segments:
-                        safe = _re3.sub(r"[{}<>|\\]", " ", txt).strip()
-                        sf.write(f"Dialogue: 0,{_ts_ass3(ts)},{_ts_ass3(te)},Default,,0,0,0,,{safe}\n")
-                print(f"[INFO] ASS: {len(subtitle_segments)} entries")
-            inputs, fparts = [], []
+            import time as _t2
+            print(f"[INFO] No-avatar: bg concat ({len(valid_segs)} clips)...")
+            t0 = _t2.time()
+
+            # --- Step 1: bg concat to temp file ---
+            bg_concat_tmp = os.path.join(TEMP_DIR, f"_bg_{uuid.uuid4().hex[:8]}.mp4")
+            _inputs, _fparts = [], []
             for idx, (p, dur) in enumerate(valid_segs):
-                inputs += ["-i", p]
-                # FIX: loop+trim handles short clips correctly without tpad double-processing
-                fparts.append(
-                    f"[{idx}:v]setpts=PTS-STARTPTS,"
-                    f"loop=loop=-1:size=32767:start=0,"
-                    f"trim=duration={dur:.3f},setpts=PTS-STARTPTS,"
-                    f"scale={vw}:{vh}:force_original_aspect_ratio=decrease,"
-                    f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2,fps={fps}[v{idx}]"
-                )
-            cin  = "".join(f"[v{i}]" for i in range(len(valid_segs)))
-            fc   = ";".join(fparts) + f";{cin}concat=n={len(valid_segs)}:v=1:a=0[vcat]"
-            last = "vcat"
-
-            if ass_path:
-                sp = ass_path.replace("\\", "/")
-                if len(sp) > 1 and sp[1] == ":":
-                    sp = sp[0] + "\\:" + sp[2:]
-                fc += f";[{last}]subtitles='{sp}'[vsub]"
-                last = "vsub"
-
-            audio_input = []
-            audio_map   = ["-an"]
-            if _pre_audio_saved and os.path.exists(pre_audio_path):
-                audio_input = ["-i", pre_audio_path]
-                audio_map   = ["-map", f"{len(valid_segs)}:a", "-c:a", "copy"]
-
-            cmd = ([ff, "-y"] + inputs + audio_input +
-                   ["-filter_complex", fc, "-map", f"[{last}]", "-r", str(fps)] +
-                   enc_args + audio_map + ["-movflags", "+faststart", out_path])
-
-            res = subprocess.run(cmd, capture_output=True, timeout=600)
-            if ass_path:
-                try: os.remove(ass_path)
-                except: pass
-            if res.returncode == 0 and os.path.exists(out_path):
-                print(f"[OK] {os.path.basename(out_path)}")
-                return out_path
+                ext = os.path.splitext(p)[1].lower()
+                is_img = ext in ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+                if is_img:
+                    _inputs += ["-loop", "1", "-t", str(dur), "-i", p]
+                else:
+                    _inputs += ["-i", p]
+                # Smart loop: only loop short clips, trim long clips directly
+                _probe = subprocess.run(
+                    [ff, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", p],
+                    capture_output=True, text=True, timeout=10)
+                try: _cdur = float(_probe.stdout.strip())
+                except: _cdur = 0
+                if is_img or _cdur < dur:
+                    _fparts.append(
+                        f"[{idx}:v]setpts=PTS-STARTPTS,"
+                        f"loop=loop=-1:size=32767:start=0,"
+                        f"trim=duration={dur:.3f},setpts=PTS-STARTPTS,"
+                        f"scale={vw}:{vh}:force_original_aspect_ratio=decrease,"
+                        f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2,fps={fps}[v{idx}]"
+                    )
+                else:
+                    _fparts.append(
+                        f"[{idx}:v]setpts=PTS-STARTPTS,"
+                        f"trim=duration={dur:.3f},setpts=PTS-STARTPTS,"
+                        f"scale={vw}:{vh}:force_original_aspect_ratio=decrease,"
+                        f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2,fps={fps}[v{idx}]"
+                    )
+            _cin = "".join(f"[v{i}]" for i in range(len(valid_segs)))
+            _fc  = ";".join(_fparts) + f";{_cin}concat=n={len(valid_segs)}:v=1:a=0[vcat]"
+            _concat_cmd = ([ff, "-y"] + _inputs +
+                           ["-filter_complex", _fc, "-map", "[vcat]",
+                            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                            "-pix_fmt", "yuv420p", "-threads", "0", bg_concat_tmp])
+            _cr = subprocess.run(_concat_cmd, capture_output=True, timeout=300)
+            if _cr.returncode != 0 or not os.path.exists(bg_concat_tmp):
+                print(f"[WARN] bg concat failed: {_cr.stderr.decode(errors='replace')[-200:]}")
             else:
-                print(f"[WARN] ffmpeg no-avatar encode failed: {res.stderr.decode(errors='replace')[-300:]}")
+                sz = os.path.getsize(bg_concat_tmp) // (1024*1024)
+                print(f"[INFO] Bg concat done in {_t2.time()-t0:.1f}s — {sz}MB")
+
+                # --- Step 2: composite (subtitles) + NVENC encode with audio ---
+                ass_path = None
+                if subtitles and subtitle_segments:
+                    import re as _re3
+                    def _ts_ass3(s):
+                        h = int(s//3600); m = int((s%3600)//60); sec = s%60
+                        cs = int((sec%1)*100); sec = int(sec)
+                        return f"{h}:{m:02d}:{sec:02d}.{cs:02d}"
+                    ass_path = os.path.join(TEMP_DIR, f"_subs_{uuid.uuid4().hex[:8]}.ass")
+                    ass_hdr = (
+                        "[Script Info]\nScriptType: v4.00+\n"
+                        f"PlayResX: {vw}\nPlayResY: {vh}\nWrapStyle: 1\n\n"
+                        "[V4+ Styles]\n"
+                        "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,"
+                        "OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,"
+                        "ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
+                        "Alignment,MarginL,MarginR,MarginV,Encoding\n"
+                        "Style: Default,Arial,22,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,"
+                        "1,0,0,0,100,100,0,0,1,2,0,2,20,20,30,1\n\n"
+                        "[Events]\n"
+                        "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
+                    )
+                    with open(ass_path, "w", encoding="utf-8") as sf:
+                        sf.write(ass_hdr)
+                        for txt, ts, te in subtitle_segments:
+                            safe = _re3.sub(r"[{}<>|\\]", " ", txt).strip()
+                            sf.write(f"Dialogue: 0,{_ts_ass3(ts)},{_ts_ass3(te)},Default,,0,0,0,,{safe}\n")
+                    print(f"[INFO] ASS: {len(subtitle_segments)} entries")
+
+                vf_filter = None
+                if ass_path:
+                    sp = ass_path.replace("\\", "/")
+                    if len(sp) > 1 and sp[1] == ":":
+                        sp = sp[0] + "\\:" + sp[2:]
+                    vf_filter = f"subtitles='{sp}'"
+
+                audio_in  = []
+                audio_map = ["-an"]
+                _audio_src = pre_audio_path if (_pre_audio_saved and os.path.exists(pre_audio_path)) else None
+
+                # Mix background music into audio before encode
+                if _audio_src and background_music and os.path.exists(background_music):
+                    try:
+                        _mixed_audio = os.path.join(TEMP_DIR, f"_mix_{uuid.uuid4().hex[:8]}.aac")
+                        _vol = music_volume if music_volume else 0.1
+                        _amix_cmd = [ff, "-y", "-i", _audio_src,
+                                     "-stream_loop", "-1", "-i", background_music,
+                                     "-filter_complex",
+                                     f"[0:a]volume=1.0[a1];[1:a]volume={_vol}[a2];[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                                     "-map", "[aout]", "-c:a", "aac", "-b:a", "192k",
+                                     "-shortest", _mixed_audio]
+                        _ar = subprocess.run(_amix_cmd, capture_output=True, timeout=60)
+                        if _ar.returncode == 0 and os.path.exists(_mixed_audio):
+                            _audio_src = _mixed_audio
+                            print(f"[INFO] Background music mixed in (no-avatar path)")
+                        else:
+                            print(f"[WARN] Music mix failed: {_ar.stderr.decode(errors='replace')[-200:]}")
+                    except Exception as _me2:
+                        print(f"[WARN] Music mix error: {_me2}")
+
+                if _audio_src and os.path.exists(_audio_src):
+                    audio_in  = ["-i", _audio_src]
+                    audio_map = ["-map", "1:a", "-c:a", "copy"]
+
+                cmd2 = ([ff, "-y", "-i", bg_concat_tmp] + audio_in)
+                if vf_filter:
+                    cmd2 += ["-vf", vf_filter]
+                cmd2 += (["-map", "0:v"] + enc_args + audio_map +
+                         ["-r", str(fps), "-movflags", "+faststart", out_path])
+
+                t1 = _t2.time()
+                res2 = subprocess.run(cmd2, capture_output=True, timeout=600)
+                try: os.remove(bg_concat_tmp)
+                except: pass
+                if ass_path:
+                    try: os.remove(ass_path)
+                    except: pass
+                if res2.returncode == 0 and os.path.exists(out_path):
+                    print(f"[OK] {os.path.basename(out_path)} (encode {_t2.time()-t1:.1f}s)")
+                    return out_path
+                else:
+                    print(f"[WARN] encode failed: {res2.stderr.decode(errors='replace')[-300:]}")
 
         # Final fallback: MoviePy encode
         print(f"[INFO] Fallback encode via moviepy...")

@@ -275,6 +275,7 @@ def api_render():
     if request.method == "OPTIONS": return jsonify({"status":"ok"}), 200
     data             = request.get_json(force=True)
     project          = data.get("project_name","video_project")
+    main_keyword     = (data.get("main_keyword") or "").strip()
     scenes           = data.get("scenes",[]) or []
     auto_ai          = bool(data.get("auto_ai_images",True))
     subtitles        = bool(data.get("subtitles", True))
@@ -297,7 +298,8 @@ def api_render():
             use_elevenlabs=use_elevenlabs,
             background_music=background_music, music_volume=music_volume,
             use_avatar=use_avatar, avatar_position=avatar_position,
-            avatar_size=avatar_size, avatar_style=avatar_style
+            avatar_size=avatar_size, avatar_style=avatar_style,
+            main_keyword=main_keyword
         )
         filename = os.path.basename(path)
         return jsonify({"video_path":path,"filename":filename,"download_url":f"/api/video/{filename}"})
@@ -332,12 +334,16 @@ def root():
 def generate_images_v2():
     if request.method == "OPTIONS": return "", 200
     try:
-        scenes = request.json.get("scenes",[])
+        scenes       = request.json.get("scenes",[])
+        main_keyword = (request.json.get("main_keyword") or "").strip()
         results = []
         for scene in scenes:
             scene_id = scene["id"]
-            prompt   = scene.get("image_prompt") or scene.get("text","")
-            print(f"[INFO] Static image: {scene_id}")
+            base_prompt = scene.get("image_prompt") or scene.get("text","")
+            # Prepend keyword so Flux stays on-topic even when scene text is vague
+            # e.g. keyword="cats" + "they are very curious" → "cats, they are very curious"
+            prompt = f"{main_keyword}, {base_prompt}" if main_keyword and main_keyword.lower() not in base_prompt.lower() else base_prompt
+            print(f"[INFO] Static image: {scene_id} — prompt: '{prompt[:80]}'")
             ok = False
             try:
                 filename    = f"{scene_id}.png"
@@ -360,31 +366,29 @@ def generate_images_v2():
         import traceback; traceback.print_exc()
         return jsonify({"error":str(e)}), 500
 
-# ── DYNAMIC videos ───────────────────────────────────────────────────────────
+# ── DYNAMIC videos — PARALLELISED ────────────────────────────────────────────
 @app.route("/api/generate_images_v2_dynamic", methods=["POST","OPTIONS"])
 def generate_images_v2_dynamic():
     """
-    Fetch Pexels videos per scene.
-    - Max 30MB per file
-    - per_page=20 for more candidates
-    - Duration-aware: first pass only picks clips >= TTS duration (no loop needed)
-    - Second pass fallback: any duration (utils.py loops seamlessly)
-    - Tracks used video IDs to avoid duplicates across scenes
-    - Prefers 1080p, rejects 4K
+    Fetch Pexels videos per scene — fully parallelised with ThreadPoolExecutor.
+    All scenes search + download simultaneously; total time ≈ slowest single scene.
+    - Max 30MB per file, per_page=20, duration-aware, prefers 1080p, rejects 4K
     - Falls back to static image if nothing found
     """
     if request.method == "OPTIONS": return "", 200
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
     MAX_MB = 30
 
     try:
         scenes     = request.json.get("scenes", [])
         pexels_key = os.getenv("PEXELS_API_KEY", "")
-        results    = []
-        used_video_ids = set()
+        main_keyword = (request.json.get("main_keyword") or "").strip()
 
-        # FIX: pass voice_id from scenes so get_scene_durations uses the right
-        # TTS engine (ElevenLabs if configured, gTTS as fallback).
-        # Pick the first non-gtts voice_id found across scenes.
+        # Thread-safe set for deduplicating video IDs across parallel workers
+        used_video_ids = set()
+        _lock = threading.Lock()
+
         _sample_voice = next(
             (s.get("voice_id", "").strip() for s in scenes
              if s.get("voice_id", "").strip()
@@ -392,7 +396,7 @@ def generate_images_v2_dynamic():
             None
         )
 
-        # Pre-compute TTS durations — parallelised, ElevenLabs-aware
+        # Pre-compute TTS durations (already parallelised inside get_scene_durations)
         print("[INFO] Pre-computing scene durations from TTS...")
         try:
             duration_map = {sid: dur for sid, dur
@@ -401,15 +405,122 @@ def generate_images_v2_dynamic():
             print(f"[WARN] get_scene_durations failed ({_de}), using 5s defaults")
             duration_map = {s["id"]: 5.0 for s in scenes}
 
-        for scene in scenes:
+        # Shared subject for Pexels queries:
+        # - One-click: extracted from the topic string ("the future of electric vehicles" → "electric vehicles")
+        # - Normal UI:  user types it directly in the keyword popup → sent as main_keyword
+        # Either way, one Groq call extracts the core noun/phrase from whatever was provided.
+        _shared_subject = ""
+        _keyword_source = main_keyword or (scenes[0].get("text", "") if scenes else "")
+        if _keyword_source:
+            try:
+                from utils import groq_client, groq_available
+                if groq_available and groq_client:
+                    _sr = groq_client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[{"role": "user", "content":
+                            f"Extract ONLY the main subject noun or short noun phrase (1-3 words, e.g. 'cat', "
+                            f"'electric vehicles', 'coffee shop') from this text. "
+                            f"Reply with ONLY that noun/phrase, nothing else:\n\n{_keyword_source[:200]}"}],
+                        max_tokens=8, temperature=0.0)
+                    _shared_subject = _sr.choices[0].message.content.strip().strip(" \t\"'.,").lower()
+                    print(f"[INFO] Shared Pexels subject: '{_shared_subject}' (from: '{_keyword_source[:60]}')")
+            except Exception as _se:
+                print(f"[WARN] Subject extraction failed ({_se}), using source directly")
+                _shared_subject = _keyword_source.split()[-1].lower()  # last word of topic as fallback
+        if not _shared_subject and scenes:
+            _shared_subject = (scenes[0].get("text") or "").split()[0].lower()
+
+        def _get_search_query(scene_text, shared_subject):
+            """Fallback: build a query from scene text + shared subject."""
+            if not shared_subject:
+                return scene_text[:60]
+            words = [w.strip(".,!?") for w in scene_text.split() if len(w) > 4]
+            extra = words[0] if words else ""
+            return f"{shared_subject} {extra}".strip() if extra else shared_subject
+
+        # Pre-compute ALL Pexels queries in ONE Groq call so each scene gets a
+        # distinct, context-aware query based on the full narrative — not just
+        # its own 3 words.
+        _query_map = {}
+        try:
+            from utils import groq_client, groq_available
+            if groq_available and groq_client and _shared_subject and scenes:
+                _scene_list = "\n".join(
+                    f"{i+1}. [{s['id']}] {(s.get('text') or '')[:120]}"
+                    for i, s in enumerate(scenes)
+                    if not s.get("image_prompt", "").strip()
+                )
+                if _scene_list:
+                    _qr = groq_client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=[{"role": "user", "content":
+                            f"Subject: '{_shared_subject}'\n"
+                            f"Here are the video scenes:\n{_scene_list}\n\n"
+                            f"For EACH scene generate a unique 2-4 word Pexels stock video search query.\n"
+                            f"Rules:\n"
+                            f"- Always start with '{_shared_subject}'\n"
+                            f"- Each query MUST be different — no two identical queries\n"
+                            f"- Use each scene's specific content for the action/setting\n"
+                            f"  (e.g. 'charging station', 'highway driving', 'factory production', 'city commute')\n"
+                            f"- Reply ONLY as valid JSON: {{\"scene_id\": \"query\", ...}}\n"
+                            f"- Example: {{\"scene_1\": \"electric vehicles charging\", \"scene_2\": \"electric vehicles highway\"}}"
+                        }],
+                        max_tokens=400,
+                        temperature=0.4,
+                    )
+                    import json as _json, re as _re4
+                    _raw = _qr.choices[0].message.content.strip()
+                    _raw = _re4.sub(r"```[a-z]*\n?|```", "", _raw).strip()
+                    try:
+                        _query_map = _json.loads(_raw)
+                        print(f"[INFO] Pre-computed {len(_query_map)} Pexels queries:")
+                        for sid, q in _query_map.items():
+                            print(f"       {sid}: '{q}'")
+                    except Exception as _je:
+                        print(f"[WARN] Query map parse failed ({_je}), falling back to per-scene")
+        except Exception as _qe:
+            print(f"[WARN] Bulk query generation failed ({_qe}), falling back to per-scene")
+
+        def _fetch_one(scene):
+            """Search Pexels and download video for one scene. Runs in its own thread."""
             scene_id     = scene["id"]
-            prompt       = scene.get("image_prompt") or scene.get("text", "")
+            raw_text     = scene.get("text", "")
             min_duration = duration_map.get(scene_id, 5.0)
-            print(f"[INFO] Dynamic video search: {scene_id} — {prompt[:60]}")
+
+            # Use custom image_prompt if set, otherwise ask Groq for context-aware query
+            if scene.get("image_prompt", "").strip():
+                prompt = scene["image_prompt"].strip()
+                print(f"[INFO] Dynamic video search: {scene_id} — using custom prompt")
+            else:
+                # Use pre-computed query if available, else fallback
+                if scene_id in _query_map:
+                    prompt = _query_map[scene_id]
+                    if _shared_subject and _shared_subject.lower() not in prompt.lower():
+                        prompt = _shared_subject + " " + prompt
+                else:
+                    prompt = _get_search_query(raw_text, _shared_subject)
+                print(f"[INFO] Dynamic video search: {scene_id} — query: '{prompt}'")
             print(f"       Min duration needed: {min_duration:.1f}s")
 
             video_url       = None
             selected_vid_id = None
+
+            def score_file(f):
+                w    = f.get("width", 0)
+                size = f.get("size", 0) / (1024 * 1024)
+                if size > MAX_MB: return -1
+                if w > 2560:     return -1  # reject 4K
+                return -abs(w - 1920)        # closest to 1080p wins
+
+            def best_file_for_vid(vid):
+                files = [f for f in vid.get("video_files", [])
+                         if "video" in f.get("file_type", "")]
+                if not files: return None
+                bf = max(files, key=score_file)
+                if score_file(bf) < 0:
+                    bf = min(files, key=lambda f: f.get("size", 999999999))
+                    if bf.get("size", 0) / 1024 / 1024 > MAX_MB: return None
+                return bf
 
             try:
                 r = requests.get(
@@ -421,35 +532,17 @@ def generate_images_v2_dynamic():
                 if r.status_code == 200:
                     videos = r.json().get("videos", [])
 
-                    def score_file(f):
-                        w    = f.get("width", 0)
-                        size = f.get("size", 0) / (1024 * 1024)
-                        if size > MAX_MB: return -1
-                        if w > 2560:     return -1  # reject 4K
-                        return -abs(w - 1920)        # closest to 1080p wins
+                    # Snapshot used IDs under lock so we don't block during selection
+                    with _lock:
+                        _used = set(used_video_ids)
 
-                    def best_file_for_vid(vid):
-                        files = [f for f in vid.get("video_files", [])
-                                 if "video" in f.get("file_type", "")]
-                        if not files:
-                            return None
-                        bf = max(files, key=score_file)
-                        if score_file(bf) < 0:
-                            # try smallest as fallback
-                            bf = min(files, key=lambda f: f.get("size", 999999999))
-                            if bf.get("size", 0) / 1024 / 1024 > MAX_MB:
-                                return None
-                        return bf
-
-                    # First pass: only clips >= min_duration (no looping needed)
+                    # First pass: clips >= min_duration (no looping needed)
                     candidates = []
                     for vid in videos:
                         vid_id  = vid.get("id")
                         vid_dur = float(vid.get("duration", 0))
-                        if vid_id in used_video_ids:
-                            continue
-                        if vid_dur < min_duration:
-                            continue  # too short — skip on first pass
+                        if vid_id in _used: continue
+                        if vid_dur < min_duration: continue
                         bf = best_file_for_vid(vid)
                         if bf:
                             candidates.append((vid_id, bf, bf.get("size", 0) / 1024 / 1024, vid_dur))
@@ -460,43 +553,44 @@ def generate_images_v2_dynamic():
                         for vid in videos:
                             vid_id  = vid.get("id")
                             vid_dur = float(vid.get("duration", 0))
-                            if vid_id in used_video_ids:
-                                continue
+                            if vid_id in _used: continue
                             bf = best_file_for_vid(vid)
                             if bf:
                                 candidates.append((vid_id, bf, bf.get("size", 0) / 1024 / 1024, vid_dur))
 
                     if candidates:
                         candidates.sort(key=lambda x: abs(x[1].get("width", 0) - 1920))
-                        selected_vid_id, selected_file, size_mb, vid_dur = candidates[0]
+                        # Pick randomly from top-10 (wider pool = fewer repeats across scenes)
+                        import random as _rnd
+                        pool = candidates[:10]
+                        _rnd.shuffle(pool)
+                        selected_vid_id, selected_file, size_mb, vid_dur = pool[0]
                         video_url = selected_file.get("link")
                         w = selected_file.get("width", "?")
                         h = selected_file.get("height", "?")
                         suffix = "✓ long enough" if vid_dur >= min_duration else "— will loop"
                         print(f"    [Pexels] selected: {w}×{h} ({size_mb:.1f}MB, {vid_dur:.1f}s) {suffix}")
                     else:
-                        print(f"[WARN] No suitable video found for scene {scene_id}")
+                        print(f"[WARN] No suitable video found for {scene_id}")
                 else:
                     print(f"[WARN] Pexels API: HTTP {r.status_code}")
 
             except Exception as e:
-                print(f"[WARN] Pexels search error: {e}")
+                print(f"[WARN] Pexels search error for {scene_id}: {e}")
 
-            # Fall back to static image if no video
+            # Fall back to static image if no video found
             if not video_url:
                 print(f"[WARN] Falling back to Pexels image for {scene_id}")
                 pr = search_and_download_image(prompt, scene_id, UPLOADS)
                 if pr["success"]:
-                    results.append({
+                    return {
                         "id": scene_id, "success": True,
                         "background_path": pr["path"],
                         "url": f"/api/uploads/{pr['filename']}",
                         "filename": pr["filename"],
                         "source": "pexels_image_fallback"
-                    })
-                else:
-                    results.append({"id": scene_id, "success": False, "error": "No video or image found"})
-                continue
+                    }
+                return {"id": scene_id, "success": False, "error": "No video or image found"}
 
             # Download with hard size guard
             filename  = f"{scene_id}_dynamic.mp4"
@@ -514,7 +608,8 @@ def generate_images_v2_dynamic():
                                 if downloaded > limit:
                                     print(f"[WARN] File exceeded {MAX_MB}MB during download, skipping")
                                     fout.close()
-                                    os.remove(save_path)
+                                    try: os.remove(save_path)
+                                    except: pass
                                     downloaded = -1
                                     break
                                 fout.write(chunk)
@@ -523,26 +618,39 @@ def generate_images_v2_dynamic():
                         mb = os.path.getsize(save_path) / 1024 / 1024
                         print(f"[OK] {mb:.1f} MB -> {save_path}")
                         if selected_vid_id:
-                            used_video_ids.add(selected_vid_id)
-                        results.append({
+                            with _lock:
+                                used_video_ids.add(selected_vid_id)
+                        return {
                             "id": scene_id, "success": True,
                             "background_path": save_path,
                             "url": f"/api/uploads/{filename}",
                             "filename": filename,
                             "source": "pexels_video"
-                        })
-                    else:
-                        results.append({"id": scene_id, "success": False, "error": "Download aborted (too large)"})
-                else:
-                    results.append({"id": scene_id, "success": False, "error": f"HTTP {dl.status_code}"})
+                        }
+                    return {"id": scene_id, "success": False, "error": "Download aborted (too large)"}
+                return {"id": scene_id, "success": False, "error": f"HTTP {dl.status_code}"}
 
             except requests.Timeout:
-                print(f"[ERR] Download timeout")
-                results.append({"id": scene_id, "success": False, "error": "Download timeout"})
+                print(f"[ERR] Download timeout for {scene_id}")
+                return {"id": scene_id, "success": False, "error": "Download timeout"}
             except Exception as e:
-                print(f"[ERR] Download error: {e}")
-                results.append({"id": scene_id, "success": False, "error": str(e)})
+                print(f"[ERR] Download error for {scene_id}: {e}")
+                return {"id": scene_id, "success": False, "error": str(e)}
 
+        # Run all scenes in parallel — max 6 workers (Pexels rate-limit safe)
+        print(f"[INFO] Fetching {len(scenes)} scenes in parallel (max 10 workers)...")
+        results_map = {}
+        with ThreadPoolExecutor(max_workers=min(10, len(scenes))) as pool:
+            futures = {pool.submit(_fetch_one, scene): scene["id"] for scene in scenes}
+            for fut in as_completed(futures):
+                sid = futures[fut]
+                try:
+                    results_map[sid] = fut.result()
+                except Exception as e:
+                    results_map[sid] = {"id": sid, "success": False, "error": str(e)}
+
+        # Preserve original scene order in response
+        results = [results_map[s["id"]] for s in scenes if s["id"] in results_map]
         return jsonify({"images": results})
 
     except Exception as e:
@@ -587,6 +695,6 @@ if __name__ == "__main__":
     print(f"📸 Pexels:       {'✅' if os.getenv('PEXELS_API_KEY') else '❌'}")
     print(f"🎭 Avatar:       ENABLED")
     print(f"🎵 ElevenLabs:   ALWAYS ON")
-    print(f"🎬 Dynamic mode: /api/generate_images_v2_dynamic")
+    print(f"🎬 Dynamic mode: /api/generate_images_v2_dynamic (PARALLELISED)")
     print("="*60 + "\n")
     app.run(host="0.0.0.0", port=5001, debug=True)

@@ -1,0 +1,63 @@
+# Python 3.11.13
+# Generated from myenv1 conda environment
+# Install: pip install -r requirements.txt
+# For GPU (CUDA 11.8): pip install torch==2.7.1+cu118 torchvision==0.22.1+cu118 --index-url https://download.pytorch.org/whl/cu118
+
+# ── Web Framework ─────────────────────────────────────────────
+Flask==2.3.3
+Flask-Cors==4.0.0
+Werkzeug==3.1.3
+itsdangerous==2.2.0
+Jinja2==3.1.6
+click==8.1.8
+
+# ── AI / LLM ──────────────────────────────────────────────────
+groq==0.33.0
+openai==2.5.0
+
+# ── TTS ───────────────────────────────────────────────────────
+elevenlabs==0.2.24
+gTTS==2.4.0
+
+# ── Video / Audio ─────────────────────────────────────────────
+moviepy==1.0.3
+imageio-ffmpeg==0.4.9
+ImageIO==2.37.2
+pydub==0.25.1
+soundfile==0.13.1
+av==16.1.0
+ffmpeg_downloader==0.4.1
+
+# ── Image Processing ──────────────────────────────────────────
+pillow==12.1.1
+opencv-python==4.13.0.92
+rembg==2.0.72
+PyMatting==1.1.15
+scikit-image==0.26.0
+
+# ── ML / PyTorch (CPU) ────────────────────────────────────────
+# For GPU replace with: pip install torch==2.7.1+cu118 torchvision==0.22.1+cu118 --index-url https://download.pytorch.org/whl/cu118
+torch==2.7.1
+torchvision==0.22.1
+
+# ── Deep Learning (optional — used by rembg/wav2lip deps) ─────
+onnxruntime==1.19.2
+tensorflow==2.20.0
+tensorflow-hub==0.16.1
+
+# ── Utilities ─────────────────────────────────────────────────
+requests==2.31.0
+python-dotenv==1.0.0
+numpy==2.3.5
+tqdm==4.67.1
+scipy==1.17.0
+aiohttp==3.12.15
+httpx==0.28.1
+huggingface_hub==1.4.1
+safetensors==0.7.0
+pydantic==1.10.23
+python-dateutil==2.9.0.post0
+PyYAML==6.0.3
+psutil==7.2.2
+regex==2026.1.15
+rich==14.3.2
