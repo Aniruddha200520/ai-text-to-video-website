@@ -296,7 +296,11 @@ def _detect_nvenc():
         check = subprocess.run([ff, "-codecs"], capture_output=True, text=True, timeout=5)
         codec_list = check.stdout
 
-        if "hevc_nvenc" in codec_list:
+        # Using h264_nvenc instead of hevc_nvenc for universal compatibility
+        # (WhatsApp, Windows Media Player, phones all support H.264)
+        if "h264_nvenc" in codec_list:
+            pass  # handled below
+        if False and "hevc_nvenc" in codec_list:
             ok, working_preset = _test_nvenc_encoder(ff, "hevc_nvenc", preset)
             if ok:
                 return (["-c:v", "hevc_nvenc", "-preset", working_preset, "-pix_fmt", "yuv420p"],
@@ -1394,7 +1398,7 @@ def render_video(project_name, scenes, auto_ai=True, size=(1280, 720), fps=25,
     # Resolve default voice once (thread-safe: read-only after this point)
     _default_voice_id = (
         VOICE_JESSICA if (use_avatar and avatar_style == "female" and VOICE_JESSICA)
-        else (VOICE_WILL if (VOICE_WILL and use_elevenlabs) else "gtts")
+        else (VOICE_WILL  if (use_avatar and avatar_style == "male" and VOICE_WILL) else "gtts")
     )
     print(f"[INFO] Default TTS voice for this render: {_default_voice_id}")
 
